@@ -307,7 +307,7 @@ fn render_confirm_dialog(f: &mut Frame, action: &ConfirmAction) {
 
 fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
     let hint = match &app.mode {
-        Mode::Normal => "j/k:nav  s:start profile  n:new  x:stop  r:restart  l:logs  q:quit",
+        Mode::Normal => "j/k:nav  s:start profile  n:new  x:stop  r:restart  l:logs  o:open  q:quit",
         Mode::Logs => "j/k:scroll  Esc:back  q:quit",
         Mode::NewForward => "Tab:complete/next  Enter:next/submit  Esc:cancel",
         Mode::ProfilePicker => "j/k:nav  Enter:start  Esc:cancel",

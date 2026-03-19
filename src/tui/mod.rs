@@ -114,6 +114,14 @@ fn handle_normal_key(app: &mut AppState, key: KeyCode) {
                 app.mode = Mode::Logs;
             }
         }
+        KeyCode::Char('o') => {
+            if let Some(fwd) = app.forwards.get(app.selected) {
+                let url = format!("http://localhost:{}", fwd.local_port);
+                let cmd = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+                let _ = std::process::Command::new(cmd).arg(&url).spawn();
+                app.status_message = Some(format!("Opened {url}"));
+            }
+        }
         _ => {}
     }
 }
