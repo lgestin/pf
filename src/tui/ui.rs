@@ -242,9 +242,11 @@ fn render_new_forward_form(f: &mut Frame, app: &AppState, area: Rect) {
     }
 
     let hint_text = if app.input_field == InputField::Host && !app.host_suggestions.is_empty() {
-        "  Tab: cycle hosts | Enter: submit | Esc: cancel"
-    } else {
+        "  Tab: cycle hosts | Enter: next field | Esc: cancel"
+    } else if app.input_field == InputField::Name {
         "  Tab: next field | Enter: submit | Esc: cancel"
+    } else {
+        "  Tab: next field | Enter: next field | Esc: cancel"
     };
     let hint = Line::from(Span::styled(
         hint_text,
@@ -307,7 +309,7 @@ fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
     let hint = match &app.mode {
         Mode::Normal => "j/k:nav  s:start profile  n:new  x:stop  r:restart  l:logs  q:quit",
         Mode::Logs => "j/k:scroll  Esc:back  q:quit",
-        Mode::NewForward => "Tab:next field  Enter:submit  Esc:cancel",
+        Mode::NewForward => "Tab:complete/next  Enter:next/submit  Esc:cancel",
         Mode::ProfilePicker => "j/k:nav  Enter:start  Esc:cancel",
         Mode::Confirm(_) => "y:confirm  n/Esc:cancel",
     };

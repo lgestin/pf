@@ -134,22 +134,36 @@ fn handle_logs_key(app: &mut AppState, key: KeyCode) {
     }
 }
 
+fn advance_input_field(app: &mut AppState) {
+    // Pre-fill remote port from local port if empty
+    if app.input_field == state::InputField::LocalPort && app.input_remote_port.is_empty() {
+        app.input_remote_port = app.input_local_port.clone();
+    }
+    app.host_suggestions.clear();
+    app.host_suggestion_idx = None;
+    app.input_field = app.input_field.next();
+    if app.input_field == state::InputField::Host {
+        app.update_host_suggestions();
+    }
+}
+
 fn handle_new_forward_key(app: &mut AppState, key: KeyCode) {
     match key {
         KeyCode::Esc => app.mode = Mode::Normal,
         KeyCode::Tab => {
             if app.input_field == state::InputField::Host && !app.host_suggestions.is_empty() {
-                // Cycle through SSH host suggestions
                 app.cycle_host_suggestion();
             } else {
-                app.input_field = app.input_field.next();
-                if app.input_field == state::InputField::Host {
-                    app.update_host_suggestions();
-                }
+                advance_input_field(app);
             }
         }
         KeyCode::BackTab => {
+            app.host_suggestions.clear();
+            app.host_suggestion_idx = None;
             app.input_field = app.input_field.prev();
+            if app.input_field == state::InputField::Host {
+                app.update_host_suggestions();
+            }
         }
         KeyCode::Backspace => {
             app.current_input().pop();
@@ -164,6 +178,12 @@ fn handle_new_forward_key(app: &mut AppState, key: KeyCode) {
             }
         }
         KeyCode::Enter => {
+            // If not on the last field, advance to next field
+            if app.input_field != state::InputField::Name {
+                advance_input_field(app);
+                return;
+            }
+            // On the last field: submit the form
             let host = app.input_host.clone();
             let name = if app.input_name.is_empty() {
                 None
