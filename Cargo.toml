@@ -1,0 +1,47 @@
+[package]
+name = "pf"
+version = "0.1.0"
+edition = "2021"
+description = "SSH Port Forward Manager"
+repository = "https://github.com/lucaswolford/pf"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+colored = "2"
+nix = { version = "0.29", features = ["signal", "process"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+comfy-table = "7"
+log = "0.4"
+simplelog = "0.12"
+signal-hook = "0.3"
+ratatui = "0.29"
+crossterm = "0.28"
+clap_complete = "4"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Config for 'dist'
+[workspace.metadata.dist]
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]
+# Whether to auto-include files like READMEs, LICENSEs, and CHANGELOGs (default true)
+auto-includes = true
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.31.0"
+# Whether to install an updater program
+install-updater = false
