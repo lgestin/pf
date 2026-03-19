@@ -5,6 +5,12 @@ A Rust CLI + TUI for managing SSH tunnels as background daemons with auto-reconn
 ## Install
 
 ```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/lgestin/pf/releases/latest/download/pf-installer.sh | sh
+```
+
+Or build from source:
+
+```bash
 cargo install --path .
 ```
 
