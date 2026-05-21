@@ -110,6 +110,12 @@ impl AppState {
         self.forwards.get(self.selected).map(|f| f.name.clone())
     }
 
+    pub fn select_by_name(&mut self, name: &str) {
+        if let Some(idx) = self.forwards.iter().position(|f| f.name == name) {
+            self.selected = idx;
+        }
+    }
+
     pub fn refresh_forwards(&mut self) {
         if let Ok(fwds) = crate::state::ForwardState::list_all() {
             let prev_selected = self.selected_name();

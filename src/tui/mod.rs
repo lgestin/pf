@@ -219,12 +219,17 @@ fn handle_new_forward_key(app: &mut AppState, key: KeyCode) {
                 app.status_message = Some("Host is required".to_string());
                 return;
             }
+            let effective_name = match name {
+                Some(n) => n.to_string(),
+                None => format!("{}-{}", host, local_port),
+            };
             match actions::start_adhoc(&host, local_port, remote_port, name) {
                 Ok(msg) => app.status_message = Some(msg),
                 Err(msg) => app.status_message = Some(msg),
             }
             app.mode = Mode::Normal;
             app.refresh_forwards();
+            app.select_by_name(&effective_name);
         }
         _ => {}
     }
@@ -258,6 +263,7 @@ fn handle_profile_picker_key(app: &mut AppState, key: KeyCode) {
                 }
                 app.mode = Mode::Normal;
                 app.refresh_forwards();
+                app.select_by_name(&name);
             }
         }
         _ => {}
