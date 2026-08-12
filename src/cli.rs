@@ -29,9 +29,13 @@ pub enum Command {
         #[arg(long, default_value = "0")]
         max_retries: u32,
 
-        /// Delay between retries in seconds
+        /// Delay before the first retry in seconds (doubles on each failure)
         #[arg(long, default_value = "5")]
         retry_delay: u64,
+
+        /// Cap on the backoff delay in seconds
+        #[arg(long, default_value = "300")]
+        max_retry_delay: u64,
     },
 
     /// Stop a running forward
@@ -122,6 +126,8 @@ pub enum Command {
         max_retries: u32,
         #[arg(long, default_value = "5")]
         retry_delay: u64,
+        #[arg(long, default_value = "300")]
+        max_retry_delay: u64,
     },
 }
 

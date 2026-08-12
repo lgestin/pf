@@ -9,8 +9,7 @@ pub fn start_profile(name: &str, host: &str, local_port: u16, remote_port: u16) 
         remote_port,
         "localhost",
         true,
-        0,
-        5,
+        watcher::RetryPolicy::default(),
     ) {
         Ok(_pid) => Ok(format!("Started {name}")),
         Err(e) => Err(format!("Failed to start {name}: {e}")),
@@ -37,8 +36,7 @@ pub fn start_adhoc(
         remote_port,
         "localhost",
         true,
-        0,
-        5,
+        watcher::RetryPolicy::default(),
     ) {
         Ok(_pid) => Ok(format!("Started {fwd_name}")),
         Err(e) => Err(format!("Failed to start {fwd_name}: {e}")),
@@ -73,8 +71,11 @@ pub fn restart_forward(name: &str) -> Result<String, String> {
         state.remote_port,
         &state.remote_host,
         state.auto_reconnect,
-        state.max_retries,
-        state.retry_delay,
+        watcher::RetryPolicy {
+            max_retries: state.max_retries,
+            initial_delay: state.retry_delay,
+            max_delay: state.max_retry_delay,
+        },
     ) {
         Ok(_pid) => Ok(format!("Restarted {name}")),
         Err(e) => Err(format!("Failed to restart {name}: {e}")),

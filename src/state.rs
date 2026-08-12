@@ -38,6 +38,12 @@ pub struct ForwardState {
     pub auto_reconnect: bool,
     pub max_retries: u32,
     pub retry_delay: u64,
+    #[serde(default = "default_max_retry_delay")]
+    pub max_retry_delay: u64,
+}
+
+fn default_max_retry_delay() -> u64 {
+    crate::watcher::DEFAULT_MAX_DELAY
 }
 
 impl ForwardState {

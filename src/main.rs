@@ -37,13 +37,17 @@ fn run(cli: Cli) -> Result<()> {
             no_reconnect,
             max_retries,
             retry_delay,
+            max_retry_delay,
         } => cmd_start(
             name_or_host,
             ports,
             name,
             !no_reconnect,
-            max_retries,
-            retry_delay,
+            watcher::RetryPolicy {
+                max_retries,
+                initial_delay: retry_delay,
+                max_delay: max_retry_delay,
+            },
         ),
 
         Command::Stop { name, all } => cmd_stop(name, all),
@@ -72,6 +76,7 @@ fn run(cli: Cli) -> Result<()> {
             reconnect,
             max_retries,
             retry_delay,
+            max_retry_delay,
         } => {
             watcher::run_watcher(
                 name,
@@ -80,8 +85,11 @@ fn run(cli: Cli) -> Result<()> {
                 remote_port,
                 remote_host.unwrap_or_else(|| "localhost".to_string()),
                 reconnect,
-                max_retries,
-                retry_delay,
+                watcher::RetryPolicy {
+                    max_retries,
+                    initial_delay: retry_delay,
+                    max_delay: max_retry_delay,
+                },
             );
             Ok(())
         }
@@ -107,8 +115,7 @@ fn cmd_start(
     ports: Option<String>,
     name: Option<String>,
     reconnect: bool,
-    max_retries: u32,
-    retry_delay: u64,
+    policy: watcher::RetryPolicy,
 ) -> Result<()> {
     // Check if name_or_host matches a saved profile
     let config = Config::load()?;
@@ -131,8 +138,7 @@ fn cmd_start(
             remote_port,
             &remote_host,
             reconnect,
-            max_retries,
-            retry_delay,
+            policy,
         )?;
 
         display::print_started(&fwd_name, &host, local_port, remote_port);
@@ -157,8 +163,7 @@ fn cmd_start(
             remote_port,
             "localhost",
             reconnect,
-            max_retries,
-            retry_delay,
+            policy,
         )?;
 
         display::print_started(&fwd_name, &name_or_host, local_port, remote_port);
@@ -226,8 +231,11 @@ fn restart_one(name: &str) -> Result<()> {
         state.remote_port,
         &state.remote_host,
         state.auto_reconnect,
-        state.max_retries,
-        state.retry_delay,
+        watcher::RetryPolicy {
+            max_retries: state.max_retries,
+            initial_delay: state.retry_delay,
+            max_delay: state.max_retry_delay,
+        },
     )?;
     display::print_started(&state.name, &state.host, state.local_port, state.remote_port);
     Ok(())
