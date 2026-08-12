@@ -13,6 +13,19 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 pub const DEFAULT_INITIAL_DELAY: u64 = 5;
 pub const DEFAULT_MAX_DELAY: u64 = 300;
 
+/// Write a timestamped watcher line to stderr, which is the forward's log file.
+/// Timestamps make it possible to read how long a tunnel actually stayed up.
+macro_rules! wlog {
+    ($name:expr, $($arg:tt)*) => {
+        eprintln!(
+            "{} [{}] {}",
+            chrono::Local::now().format("%m-%d %H:%M:%S"),
+            $name,
+            format_args!($($arg)*)
+        )
+    };
+}
+
 /// Uptime that counts as the tunnel having genuinely worked. Above ssh's
 /// `ConnectTimeout=10` and banner exchange timeouts, so a fast failure can't
 /// masquerade as success and reset the backoff.
@@ -196,7 +209,7 @@ pub fn run_watcher(
         max_retry_delay: policy.max_delay,
     };
     if let Err(e) = state.save() {
-        eprintln!("[pf watcher] Failed to save state: {e}");
+        wlog!("pf watcher", "Failed to save state: {e}");
         return;
     }
 
@@ -212,11 +225,11 @@ pub fn run_watcher(
     loop {
         if term.load(Ordering::Relaxed) {
             // Received shutdown signal
-            eprintln!("[{}] Received shutdown signal", name);
+            wlog!(name, "Received shutdown signal");
             break;
         }
 
-        eprintln!("[{}] Starting SSH tunnel ({}:{} via {})", name, local_port, remote_port, host);
+        wlog!(name, "Starting SSH tunnel ({}:{} via {})", local_port, remote_port, host);
 
         let log_path = match paths::log_file(&name) {
             Ok(p) => p,
@@ -225,7 +238,7 @@ pub fn run_watcher(
         let log_file = match OpenOptions::new().create(true).append(true).open(&log_path) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("[{}] Failed to open log: {e}", name);
+                wlog!(name, "Failed to open log: {e}");
                 break;
             }
         };
@@ -233,7 +246,7 @@ pub fn run_watcher(
         let mut child = match params.spawn(log_file) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[{}] Failed to spawn SSH: {e}", name);
+                wlog!(name, "Failed to spawn SSH: {e}");
                 state.status = ForwardStatus::Failed;
                 let _ = state.save();
                 break;
@@ -246,26 +259,26 @@ pub fn run_watcher(
         state.status = ForwardStatus::Running;
         let _ = state.save();
 
-        eprintln!("[{}] SSH tunnel started (pid {})", name, ssh_pid);
+        wlog!(name, "SSH tunnel started (pid {})", ssh_pid);
 
         // Wait for SSH to exit, checking for shutdown signal periodically
         loop {
             if term.load(Ordering::Relaxed) {
-                eprintln!("[{}] Shutting down SSH (pid {})", name, ssh_pid);
+                wlog!(name, "Shutting down SSH (pid {})", ssh_pid);
                 let _ = child.kill();
                 let _ = child.wait();
                 break;
             }
             match child.try_wait() {
                 Ok(Some(exit)) => {
-                    eprintln!("[{}] SSH exited with {}", name, exit);
+                    wlog!(name, "SSH exited with {} after {}s", exit, started.elapsed().as_secs());
                     break;
                 }
                 Ok(None) => {
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
                 Err(e) => {
-                    eprintln!("[{}] Error waiting for SSH: {e}", name);
+                    wlog!(name, "Error waiting for SSH: {e}");
                     break;
                 }
             }
@@ -280,21 +293,18 @@ pub fn run_watcher(
         let uptime = started.elapsed().as_secs();
 
         if !reconnect {
-            eprintln!("[{}] Auto-reconnect disabled, exiting", name);
+            wlog!(name, "Auto-reconnect disabled, exiting");
             state.status = ForwardStatus::Failed;
             let _ = state.save();
             break;
         }
 
         if uptime >= HEALTHY_UPTIME_SECS && retries > 0 {
-            eprintln!("[{}] Was up {}s, resetting backoff", name, uptime);
+            wlog!(name, "Was up {}s, resetting backoff", uptime);
         }
         retries = next_retry_count(retries, uptime);
         if policy.max_retries > 0 && retries > policy.max_retries {
-            eprintln!(
-                "[{}] Max retries ({}) exceeded, giving up",
-                name, policy.max_retries
-            );
+            wlog!(name, "Max retries ({}) exceeded, giving up", policy.max_retries);
             state.status = ForwardStatus::Failed;
             let _ = state.save();
             break;
@@ -306,9 +316,9 @@ pub fn run_watcher(
         state.reconnect_count += 1;
         let _ = state.save();
 
-        eprintln!(
-            "[{}] Reconnecting in {}s (attempt {}{})...",
+        wlog!(
             name,
+            "Reconnecting in {}s (attempt {}{})...",
             delay,
             retries,
             if policy.max_retries > 0 {
@@ -332,7 +342,7 @@ pub fn run_watcher(
     state.status = ForwardStatus::Stopped;
     let _ = state.save();
     let _ = ForwardState::remove(&name);
-    eprintln!("[{}] Watcher exiting", name);
+    wlog!(name, "Watcher exiting");
 }
 
 #[cfg(test)]
