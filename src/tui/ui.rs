@@ -34,10 +34,10 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
     render_status_bar(f, app, chunks[2]);
 
     // Render overlays
-    match &mode {
-        Mode::ProfilePicker => render_profile_picker(f, app),
-        Mode::Confirm(action) => render_confirm_dialog(f, action),
-        _ => {}
+    if matches!(mode, Mode::ProfilePicker) {
+        render_profile_picker(f, app);
+    } else if let Mode::Confirm(action) = &mode {
+        render_confirm_dialog(f, action);
     }
 }
 
@@ -267,36 +267,36 @@ fn render_new_forward_form(f: &mut Frame, app: &AppState, area: Rect) {
     f.render_widget(Paragraph::new(hint), fields[offset + 3]);
 }
 
-fn render_profile_picker(f: &mut Frame, app: &AppState) {
+fn render_profile_picker(f: &mut Frame, app: &mut AppState) {
     let area = centered_rect(50, 60, f.area());
     f.render_widget(Clear, area);
 
     let items: Vec<ListItem> = app
         .profiles
         .iter()
-        .enumerate()
-        .map(|(i, (name, profile))| {
-            let style = if i == app.profile_selected {
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+        .map(|(name, profile)| {
             ListItem::new(format!(
                 "{name}: {} ({}:{})",
                 profile.host, profile.local_port, profile.remote_port
             ))
-            .style(style)
         })
         .collect();
 
-    let list = List::new(items).block(
-        Block::default()
-            .title(" Select Profile ")
-            .borders(Borders::ALL),
-    );
-    f.render_widget(list, area);
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("› ")
+        .highlight_spacing(HighlightSpacing::Always)
+        .block(
+            Block::default()
+                .title(" Select Profile ")
+                .borders(Borders::ALL),
+        );
+
+    f.render_stateful_widget(list, area, &mut app.profile_state);
 }
 
 fn render_confirm_dialog(f: &mut Frame, action: &ConfirmAction) {
@@ -448,5 +448,57 @@ mod tests {
         app.select_next();
         app.select_prev();
         assert_eq!(app.selected(), 0);
+    }
+
+    #[test]
+    fn profile_picker_scrolls_to_the_selected_profile() {
+        let mut app = AppState::new();
+        app.profiles = (0..40)
+            .map(|i| {
+                (
+                    format!("prof-{i:02}"),
+                    crate::config::Profile {
+                        host: "example".to_string(),
+                        local_port: 9000 + i as u16,
+                        remote_port: 80,
+                        remote_host: "localhost".to_string(),
+                    },
+                )
+            })
+            .collect();
+        app.mode = Mode::ProfilePicker;
+        app.select_profile(39);
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("prof-39"), "selected profile not rendered:\n{text}");
+        assert!(!text.contains("prof-00"), "picker did not scroll:\n{text}");
+    }
+
+    #[test]
+    fn profile_navigation_wraps() {
+        let mut app = AppState::new();
+        app.profiles = (0..3)
+            .map(|i| {
+                (
+                    format!("prof-{i}"),
+                    crate::config::Profile {
+                        host: "example".to_string(),
+                        local_port: 9000 + i as u16,
+                        remote_port: 80,
+                        remote_host: "localhost".to_string(),
+                    },
+                )
+            })
+            .collect();
+
+        app.select_profile(2);
+        app.select_next_profile();
+        assert_eq!(app.profile_selected(), 0);
+
+        app.select_prev_profile();
+        assert_eq!(app.profile_selected(), 2);
     }
 }

@@ -1,5 +1,5 @@
 use crate::state::ForwardState;
-use ratatui::widgets::TableState;
+use ratatui::widgets::{ListState, TableState};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
@@ -58,7 +58,7 @@ pub struct AppState {
     pub forwards: Vec<ForwardState>,
     pub table_state: TableState,
     pub profiles: Vec<(String, crate::config::Profile)>,
-    pub profile_selected: usize,
+    pub profile_state: ListState,
     pub should_quit: bool,
 
     // Log viewer
@@ -90,7 +90,7 @@ impl AppState {
             forwards: Vec::new(),
             table_state: TableState::new().with_selected(Some(0)),
             profiles: Vec::new(),
-            profile_selected: 0,
+            profile_state: ListState::default().with_selected(Some(0)),
             should_quit: false,
             log_lines: Vec::new(),
             log_scroll: 0,
@@ -132,6 +132,31 @@ impl AppState {
         let last = self.forwards.len() - 1;
         let prev = self.selected().checked_sub(1).unwrap_or(last);
         self.select(prev);
+    }
+
+    pub fn profile_selected(&self) -> usize {
+        self.profile_state.selected().unwrap_or(0)
+    }
+
+    pub fn select_profile(&mut self, idx: usize) {
+        self.profile_state.select(Some(idx));
+    }
+
+    pub fn select_next_profile(&mut self) {
+        if self.profiles.is_empty() {
+            return;
+        }
+        let next = (self.profile_selected() + 1) % self.profiles.len();
+        self.select_profile(next);
+    }
+
+    pub fn select_prev_profile(&mut self) {
+        if self.profiles.is_empty() {
+            return;
+        }
+        let last = self.profiles.len() - 1;
+        let prev = self.profile_selected().checked_sub(1).unwrap_or(last);
+        self.select_profile(prev);
     }
 
     pub fn selected_name(&self) -> Option<String> {

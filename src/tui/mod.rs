@@ -85,7 +85,7 @@ fn handle_normal_key(app: &mut AppState, key: KeyCode) {
             if app.profiles.is_empty() {
                 app.status_message = Some("No saved profiles. Use 'pf config add' first.".to_string());
             } else {
-                app.profile_selected = 0;
+                app.select_profile(0);
                 app.mode = Mode::ProfilePicker;
             }
         }
@@ -230,21 +230,10 @@ fn handle_new_forward_key(app: &mut AppState, key: KeyCode) {
 fn handle_profile_picker_key(app: &mut AppState, key: KeyCode) {
     match key {
         KeyCode::Esc => app.mode = Mode::Normal,
-        KeyCode::Char('j') | KeyCode::Down => {
-            if !app.profiles.is_empty() {
-                app.profile_selected = (app.profile_selected + 1) % app.profiles.len();
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if !app.profiles.is_empty() {
-                app.profile_selected = app
-                    .profile_selected
-                    .checked_sub(1)
-                    .unwrap_or(app.profiles.len() - 1);
-            }
-        }
+        KeyCode::Char('j') | KeyCode::Down => app.select_next_profile(),
+        KeyCode::Char('k') | KeyCode::Up => app.select_prev_profile(),
         KeyCode::Enter => {
-            if let Some((name, profile)) = app.profiles.get(app.profile_selected) {
+            if let Some((name, profile)) = app.profiles.get(app.profile_selected()) {
                 let name = name.clone();
                 let host = profile.host.clone();
                 let lp = profile.local_port;
