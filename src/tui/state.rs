@@ -3,6 +3,7 @@ use ratatui::widgets::{ListState, TableState};
 use std::collections::{BTreeSet, HashSet};
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 
 /// Write `text` to the system clipboard via the platform's own tool, so pf
 /// carries no clipboard dependency.
@@ -124,6 +125,21 @@ pub struct AppState {
 
     /// Seam for `y`: the system clipboard in production, a recorder in tests.
     pub clipboard: Box<dyn Fn(&str) -> Result<(), String>>,
+
+    // Background actions: stops, restarts, and starts run off the UI thread
+    // and report back through a channel.
+    pub pending_actions: usize,
+    /// What the most recent in-flight action is doing, for the status bar.
+    pub pending_label: Option<String>,
+    action_tx: mpsc::Sender<ActionDone>,
+    action_rx: mpsc::Receiver<ActionDone>,
+}
+
+/// What a finished background action sends home: its outcome message, and
+/// optionally the (host, forward) to point the cursor at.
+struct ActionDone {
+    message: String,
+    follow: Option<(String, String)>,
 }
 
 impl AppState {
@@ -132,6 +148,7 @@ impl AppState {
         let machine_source = crate::config::Config::load()
             .map(|c| c.tui.machine_source)
             .unwrap_or_default();
+        let (action_tx, action_rx) = mpsc::channel();
 
         Self {
             mode: Mode::Normal,
@@ -161,7 +178,58 @@ impl AppState {
             ssh_hosts,
             status_message: None,
             clipboard: Box::new(system_clipboard),
+            pending_actions: 0,
+            pending_label: None,
+            action_tx,
+            action_rx,
         }
+    }
+
+    pub fn run_action<F>(&mut self, label: &str, f: F)
+    where
+        F: FnOnce() -> Result<String, String> + Send + 'static,
+    {
+        self.run_action_following(label, None, f);
+    }
+
+    /// Run `f` off the UI thread — ssh takes as long as it takes, and the
+    /// screen must not freeze for it. The outcome lands via `poll_actions`.
+    pub fn run_action_following<F>(
+        &mut self,
+        label: &str,
+        follow: Option<(String, String)>,
+        f: F,
+    ) where
+        F: FnOnce() -> Result<String, String> + Send + 'static,
+    {
+        self.pending_actions += 1;
+        self.pending_label = Some(label.to_string());
+        let tx = self.action_tx.clone();
+        std::thread::spawn(move || {
+            // Success and failure are both just a message for the status bar.
+            let message = match f() {
+                Ok(m) | Err(m) => m,
+            };
+            let _ = tx.send(ActionDone { message, follow });
+        });
+    }
+
+    /// Drain finished background actions. Returns true if any reported back.
+    pub fn poll_actions(&mut self) -> bool {
+        let mut any = false;
+        while let Ok(done) = self.action_rx.try_recv() {
+            any = true;
+            self.pending_actions = self.pending_actions.saturating_sub(1);
+            self.status_message = Some(done.message);
+            self.refresh();
+            if let Some((host, name)) = done.follow {
+                self.select_forward(&host, &name);
+            }
+        }
+        if any && self.pending_actions == 0 {
+            self.pending_label = None;
+        }
+        any
     }
 
     pub fn selected(&self) -> usize {

@@ -31,7 +31,14 @@ pub fn run() -> Result<()> {
     loop {
         terminal.draw(|f| ui::render(f, &mut app))?;
 
-        let timeout = tick_rate.saturating_sub(last_tick.elapsed());
+        app.poll_actions();
+
+        // With work in flight, wake often enough that its result shows the
+        // moment it lands rather than at the next tick.
+        let mut timeout = tick_rate.saturating_sub(last_tick.elapsed());
+        if app.pending_actions > 0 {
+            timeout = timeout.min(Duration::from_millis(100));
+        }
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
@@ -333,15 +340,12 @@ fn submit_new_forward(app: &mut AppState) {
         name
     };
 
-    match actions::start_adhoc(&host, local, remote, Some(&name)) {
-        Ok(msg) => {
-            app.status_message = Some(msg);
-            app.mode = Mode::Normal;
-            app.refresh();
-            app.select_forward(&host, &name);
-        }
-        Err(msg) => app.status_message = Some(msg),
-    }
+    app.mode = Mode::Normal;
+    app.run_action_following(
+        &format!("Starting {name}…"),
+        Some((host.clone(), name.clone())),
+        move || actions::start_adhoc(&host, local, remote, Some(&name)),
+    );
 }
 
 fn handle_profile_picker_key(app: &mut AppState, key: KeyCode) {
@@ -355,15 +359,13 @@ fn handle_profile_picker_key(app: &mut AppState, key: KeyCode) {
                 let host = profile.host.clone();
                 let lp = profile.local_port;
                 let rp = profile.remote_port;
-                match actions::start_profile(&name, &host, lp, rp) {
-                    Ok(msg) => app.status_message = Some(msg),
-                    Err(msg) => app.status_message = Some(msg),
-                }
                 app.mode = Mode::Normal;
-                app.refresh();
                 // A profile targets its own host, which may not be the machine
                 // the cursor was on, so follow the forward we just made.
-                app.select_forward(&host, &name);
+                let follow = Some((host.clone(), name.clone()));
+                app.run_action_following(&format!("Starting {name}…"), follow, move || {
+                    actions::start_profile(&name, &host, lp, rp)
+                });
             }
         }
         _ => {}
@@ -376,18 +378,29 @@ fn handle_confirm_key(app: &mut AppState, key: KeyCode) {
             let Mode::Confirm(action) = app.mode.clone() else {
                 return;
             };
-            let msg = match action {
-                ConfirmAction::StopForward(name) => actions::stop_forward(&name),
-                ConfirmAction::StopHost(host, _) => actions::stop_host(&host),
-                ConfirmAction::RestartForward(name) => actions::restart_forward(&name),
-                ConfirmAction::RestartHost(host) => actions::restart_host(&host),
-            };
-            app.status_message = Some(match msg {
-                Ok(m) => m,
-                Err(m) => m,
-            });
+            match action {
+                ConfirmAction::StopForward(name) => {
+                    app.run_action(&format!("Stopping {name}…"), move || {
+                        actions::stop_forward(&name)
+                    });
+                }
+                ConfirmAction::StopHost(host, _) => {
+                    app.run_action(&format!("Stopping {host}…"), move || {
+                        actions::stop_host(&host)
+                    });
+                }
+                ConfirmAction::RestartForward(name) => {
+                    app.run_action(&format!("Restarting {name}…"), move || {
+                        actions::restart_forward(&name)
+                    });
+                }
+                ConfirmAction::RestartHost(host) => {
+                    app.run_action(&format!("Reconnecting {host}…"), move || {
+                        actions::restart_host(&host)
+                    });
+                }
+            }
             app.mode = Mode::Normal;
-            app.refresh();
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             app.mode = Mode::Normal;
@@ -511,6 +524,72 @@ mod tests {
         app.rows = tree::flatten(&app.machines, &app.expanded);
         app.select(1); // the forward row
         app
+    }
+
+    /// Poll until the background action lands, or a deadline passes.
+    fn wait_for_actions(app: &mut AppState) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.pending_actions > 0 && Instant::now() < deadline {
+            app.poll_actions();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(app.pending_actions, 0, "action never reported back");
+    }
+
+    #[test]
+    fn run_action_reports_back_without_blocking_the_caller() {
+        let mut app = app_with_hosts(&["nas"]);
+
+        app.run_action("Stopping x…", || Ok("Stopped x".to_string()));
+        assert_eq!(app.pending_actions, 1, "the action should be pending, not done");
+        assert_eq!(app.pending_label.as_deref(), Some("Stopping x…"));
+
+        wait_for_actions(&mut app);
+        assert_eq!(app.status_message.as_deref(), Some("Stopped x"));
+        assert_eq!(app.pending_label, None, "the label should clear with the work");
+    }
+
+    #[test]
+    fn a_slow_confirm_does_not_freeze_the_ui_thread() {
+        let mut app = app_on_a_forward();
+        // restart_forward sleeps 500ms between stop and start; on the UI
+        // thread that was half a second of frozen screen.
+        app.mode = Mode::Confirm(ConfirmAction::RestartForward("jupyter".to_string()));
+
+        let t0 = Instant::now();
+        handle_key(&mut app, key(KeyCode::Char('y')));
+
+        assert!(
+            t0.elapsed() < Duration::from_millis(200),
+            "confirming an action blocked the UI thread"
+        );
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.pending_actions, 1);
+        assert!(
+            app.pending_label.as_deref().is_some_and(|l| l.contains("jupyter")),
+            "the bar should say what is in flight: {:?}",
+            app.pending_label
+        );
+
+        wait_for_actions(&mut app);
+    }
+
+    #[test]
+    fn a_finished_start_selects_the_forward_it_made() {
+        let mut app = app_with_hosts(&["nas"]);
+
+        app.run_action_following(
+            "Starting db…",
+            Some(("newhost".to_string(), "db".to_string())),
+            || Ok("Started db".to_string()),
+        );
+        wait_for_actions(&mut app);
+
+        // The follow ran: the target machine was unfolded to show the forward.
+        assert!(
+            app.expanded.contains("newhost"),
+            "completion should follow the forward it created"
+        );
     }
 
     #[test]

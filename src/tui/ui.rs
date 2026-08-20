@@ -685,6 +685,12 @@ fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled("  ", mute()));
+    } else if app.pending_actions > 0 {
+        // Work is in flight; say so until its result arrives.
+        if let Some(label) = &app.pending_label {
+            spans.push(Span::styled(label.clone(), Style::default().fg(WARN)));
+            spans.push(Span::styled("  ", mute()));
+        }
     } else if let Some(msg) = &app.status_message {
         // Failures deserve the eye; confirmations do not.
         let style = if msg.starts_with("Failed") || msg.contains("must be") {
@@ -888,6 +894,19 @@ mod tests {
         assert!(text.contains("? help"), "no way to discover the help overlay:\n{text}");
         // The long tail lives in help now; the bar stays scannable.
         assert!(!text.contains("restart"), "menu still overflowing:\n{text}");
+    }
+
+    #[test]
+    fn an_in_flight_action_shows_in_the_status_bar() {
+        let mut app = app_with(vec![], &["nas"]);
+        app.pending_actions = 1;
+        app.pending_label = Some("Restarting jupyter…".to_string());
+
+        let text = draw(&mut app, 100, 10);
+        assert!(
+            text.contains("Restarting jupyter…"),
+            "nothing says work is in flight:\n{text}"
+        );
     }
 
     #[test]
