@@ -1,4 +1,5 @@
 use crate::state::ForwardState;
+use ratatui::widgets::TableState;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
@@ -55,7 +56,7 @@ impl InputField {
 pub struct AppState {
     pub mode: Mode,
     pub forwards: Vec<ForwardState>,
-    pub selected: usize,
+    pub table_state: TableState,
     pub profiles: Vec<(String, crate::config::Profile)>,
     pub profile_selected: usize,
     pub should_quit: bool,
@@ -87,7 +88,7 @@ impl AppState {
         Self {
             mode: Mode::Normal,
             forwards: Vec::new(),
-            selected: 0,
+            table_state: TableState::new().with_selected(Some(0)),
             profiles: Vec::new(),
             profile_selected: 0,
             should_quit: false,
@@ -106,13 +107,40 @@ impl AppState {
         }
     }
 
+    pub fn selected(&self) -> usize {
+        self.table_state.selected().unwrap_or(0)
+    }
+
+    pub fn select(&mut self, idx: usize) {
+        self.table_state.select(Some(idx));
+    }
+
+    /// Wrapping next. Ratatui's own `TableState::select_next` saturates rather
+    /// than wrapping, and can run past the end of the list, so we do it here.
+    pub fn select_next(&mut self) {
+        if self.forwards.is_empty() {
+            return;
+        }
+        let next = (self.selected() + 1) % self.forwards.len();
+        self.select(next);
+    }
+
+    pub fn select_prev(&mut self) {
+        if self.forwards.is_empty() {
+            return;
+        }
+        let last = self.forwards.len() - 1;
+        let prev = self.selected().checked_sub(1).unwrap_or(last);
+        self.select(prev);
+    }
+
     pub fn selected_name(&self) -> Option<String> {
-        self.forwards.get(self.selected).map(|f| f.name.clone())
+        self.forwards.get(self.selected()).map(|f| f.name.clone())
     }
 
     pub fn select_by_name(&mut self, name: &str) {
         if let Some(idx) = self.forwards.iter().position(|f| f.name == name) {
-            self.selected = idx;
+            self.select(idx);
         }
     }
 
@@ -123,11 +151,11 @@ impl AppState {
             // Try to preserve selection
             if let Some(name) = prev_selected {
                 if let Some(idx) = self.forwards.iter().position(|f| f.name == name) {
-                    self.selected = idx;
+                    self.select(idx);
                 }
             }
-            if self.selected >= self.forwards.len() && !self.forwards.is_empty() {
-                self.selected = self.forwards.len() - 1;
+            if self.selected() >= self.forwards.len() && !self.forwards.is_empty() {
+                self.select(self.forwards.len() - 1);
             }
         }
     }

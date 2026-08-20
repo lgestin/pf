@@ -26,7 +26,7 @@ pub fn run() -> Result<()> {
     let mut last_tick = Instant::now();
 
     loop {
-        terminal.draw(|f| ui::render(f, &app))?;
+        terminal.draw(|f| ui::render(f, &mut app))?;
 
         let timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if event::poll(timeout)? {
@@ -78,16 +78,8 @@ fn handle_key(app: &mut AppState, key: KeyCode) {
 fn handle_normal_key(app: &mut AppState, key: KeyCode) {
     match key {
         KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Char('j') | KeyCode::Down => {
-            if !app.forwards.is_empty() {
-                app.selected = (app.selected + 1) % app.forwards.len();
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            if !app.forwards.is_empty() {
-                app.selected = app.selected.checked_sub(1).unwrap_or(app.forwards.len() - 1);
-            }
-        }
+        KeyCode::Char('j') | KeyCode::Down => app.select_next(),
+        KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
         KeyCode::Char('s') => {
             app.refresh_profiles();
             if app.profiles.is_empty() {
@@ -118,7 +110,7 @@ fn handle_normal_key(app: &mut AppState, key: KeyCode) {
             }
         }
         KeyCode::Char('o') => {
-            if let Some(fwd) = app.forwards.get(app.selected) {
+            if let Some(fwd) = app.forwards.get(app.selected()) {
                 let url = format!("http://localhost:{}", fwd.local_port);
                 let cmd = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
                 let _ = std::process::Command::new(cmd).arg(&url).spawn();

@@ -5,10 +5,13 @@ use chrono::Utc;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Paragraph, Row, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Table, Wrap,
+};
 use ratatui::Frame;
 
-pub fn render(f: &mut Frame, app: &AppState) {
+pub fn render(f: &mut Frame, app: &mut AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -20,7 +23,8 @@ pub fn render(f: &mut Frame, app: &AppState) {
 
     render_forwards_table(f, app, chunks[0]);
 
-    match &app.mode {
+    let mode = app.mode.clone();
+    match &mode {
         Mode::Logs => render_log_panel(f, app, chunks[1]),
         Mode::NewForward => render_new_forward_form(f, app, chunks[1]),
         Mode::Normal => {}
@@ -30,14 +34,14 @@ pub fn render(f: &mut Frame, app: &AppState) {
     render_status_bar(f, app, chunks[2]);
 
     // Render overlays
-    match &app.mode {
+    match &mode {
         Mode::ProfilePicker => render_profile_picker(f, app),
         Mode::Confirm(action) => render_confirm_dialog(f, action),
         _ => {}
     }
 }
 
-fn render_forwards_table(f: &mut Frame, app: &AppState, area: Rect) {
+fn render_forwards_table(f: &mut Frame, app: &mut AppState, area: Rect) {
     let header = Row::new(vec![
         Cell::from("Name"),
         Cell::from("Host"),
@@ -52,8 +56,7 @@ fn render_forwards_table(f: &mut Frame, app: &AppState, area: Rect) {
     let rows: Vec<Row> = app
         .forwards
         .iter()
-        .enumerate()
-        .map(|(i, fwd)| {
+        .map(|fwd| {
             let alive = process::is_alive(fwd.watcher_pid);
             let status = if alive {
                 &fwd.status
@@ -85,14 +88,6 @@ fn render_forwards_table(f: &mut Frame, app: &AppState, area: Rect) {
                 "-".to_string()
             };
 
-            let style = if i == app.selected {
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-
             Row::new(vec![
                 Cell::from(fwd.name.clone()),
                 Cell::from(fwd.host.clone()),
@@ -102,7 +97,6 @@ fn render_forwards_table(f: &mut Frame, app: &AppState, area: Rect) {
                 Cell::from(fwd.reconnect_count.to_string()),
                 Cell::from(pids),
             ])
-            .style(style)
         })
         .collect();
 
@@ -119,13 +113,30 @@ fn render_forwards_table(f: &mut Frame, app: &AppState, area: Rect) {
         ],
     )
     .header(header)
-    .block(
-        Block::default()
-            .title(" Forwards ")
-            .borders(Borders::ALL),
-    );
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol("› ")
+    .highlight_spacing(HighlightSpacing::Always)
+    .block(Block::default().title(" Forwards ").borders(Borders::ALL));
 
-    f.render_widget(table, area);
+    f.render_stateful_widget(table, area, &mut app.table_state);
+
+    // Scrollbar, drawn inside the block's right border.
+    let visible = area.height.saturating_sub(3) as usize; // borders + header
+    if app.forwards.len() > visible {
+        let mut sb_state =
+            ScrollbarState::new(app.forwards.len()).position(app.table_state.offset());
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            area,
+            &mut sb_state,
+        );
+    }
 }
 
 fn render_log_panel(f: &mut Frame, app: &AppState, area: Rect) {
@@ -360,5 +371,82 @@ fn format_duration(total_secs: i64) -> String {
         format!("{mins}m{secs:02}s")
     } else {
         format!("{secs}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{ForwardState, ForwardStatus};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn fake_forward(i: usize) -> ForwardState {
+        ForwardState {
+            name: format!("fwd-{i:02}"),
+            host: "example".to_string(),
+            local_port: 8000 + i as u16,
+            remote_port: 80,
+            remote_host: "localhost".to_string(),
+            // our own pid, so `process::is_alive` reports the row as running
+            watcher_pid: std::process::id(),
+            ssh_pid: None,
+            status: ForwardStatus::Running,
+            started_at: chrono::Utc::now(),
+            reconnect_count: 0,
+            auto_reconnect: true,
+            max_retries: 0,
+            retry_delay: 5,
+            max_retry_delay: 300,
+        }
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn selection_past_the_viewport_scrolls_into_view() {
+        let mut app = AppState::new();
+        app.forwards = (0..40).map(fake_forward).collect();
+        app.select(39);
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        let text = buffer_text(&terminal);
+        assert!(text.contains("fwd-39"), "selected row not rendered:\n{text}");
+        assert!(
+            !text.contains("fwd-00"),
+            "viewport did not scroll away from the top:\n{text}"
+        );
+    }
+
+    #[test]
+    fn navigation_wraps_at_both_ends() {
+        let mut app = AppState::new();
+        app.forwards = (0..3).map(fake_forward).collect();
+
+        app.select(2);
+        app.select_next();
+        assert_eq!(app.selected(), 0, "next past the end should wrap to 0");
+
+        app.select_prev();
+        assert_eq!(app.selected(), 2, "prev before 0 should wrap to the last");
+    }
+
+    #[test]
+    fn navigation_on_an_empty_list_does_not_panic() {
+        let mut app = AppState::new();
+        app.forwards.clear();
+        app.select_next();
+        app.select_prev();
+        assert_eq!(app.selected(), 0);
     }
 }
