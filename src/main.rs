@@ -68,30 +68,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Completions { shell } => cmd_completions(shell),
         Command::Complete { subcommand, prefix } => cmd_complete(&subcommand, &prefix),
 
-        Command::Watcher {
-            name,
-            host,
-            local_port,
-            remote_port,
-            remote_host,
-            reconnect,
-            max_retries,
-            retry_delay,
-            max_retry_delay,
-        } => {
-            watcher::run_watcher(
-                name,
-                host,
-                local_port,
-                remote_port,
-                remote_host.unwrap_or_else(|| "localhost".to_string()),
-                reconnect,
-                watcher::RetryPolicy {
-                    max_retries,
-                    initial_delay: retry_delay,
-                    max_delay: max_retry_delay,
-                },
-            );
+        Command::Watcher { host } => {
+            session::watcher::run(host);
             Ok(())
         }
     }

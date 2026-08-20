@@ -107,27 +107,11 @@ pub enum Command {
         prefix: String,
     },
 
-    /// Internal: run as watcher daemon (hidden)
+    /// Internal: run as a per-host session watcher daemon (hidden)
     #[command(hide = true)]
     Watcher {
         #[arg(long)]
-        name: String,
-        #[arg(long)]
         host: String,
-        #[arg(long)]
-        local_port: u16,
-        #[arg(long)]
-        remote_port: u16,
-        #[arg(long)]
-        remote_host: Option<String>,
-        #[arg(long)]
-        reconnect: bool,
-        #[arg(long, default_value = "0")]
-        max_retries: u32,
-        #[arg(long, default_value = "5")]
-        retry_delay: u64,
-        #[arg(long, default_value = "300")]
-        max_retry_delay: u64,
     },
 }
 

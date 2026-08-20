@@ -29,7 +29,7 @@ macro_rules! wlog {
 /// Uptime that counts as the tunnel having genuinely worked. Above ssh's
 /// `ConnectTimeout=10` and banner exchange timeouts, so a fast failure can't
 /// masquerade as success and reset the backoff.
-const HEALTHY_UPTIME_SECS: u64 = 60;
+pub(crate) const HEALTHY_UPTIME_SECS: u64 = 60;
 
 /// Retry pacing for a watcher's reconnect loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -76,14 +76,14 @@ fn apply_jitter(delay: u64, jitter_nanos: u32) -> u64 {
     half + u64::from(jitter_nanos) % (half + 1)
 }
 
-fn backoff_delay(policy: &RetryPolicy, retries: u32, jitter_nanos: u32) -> u64 {
+pub(crate) fn backoff_delay(policy: &RetryPolicy, retries: u32, jitter_nanos: u32) -> u64 {
     apply_jitter(capped_delay(policy, retries), jitter_nanos)
 }
 
 /// Retry count for the next attempt, given how long the SSH process that just
 /// died had been up. A tunnel that stayed up resets the backoff; one that died
 /// fast escalates it.
-fn next_retry_count(retries: u32, uptime_secs: u64) -> u32 {
+pub(crate) fn next_retry_count(retries: u32, uptime_secs: u64) -> u32 {
     if uptime_secs >= HEALTHY_UPTIME_SECS {
         1
     } else {
@@ -91,7 +91,7 @@ fn next_retry_count(retries: u32, uptime_secs: u64) -> u32 {
     }
 }
 
-fn jitter_nanos() -> u32 {
+pub(crate) fn jitter_nanos() -> u32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
