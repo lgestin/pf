@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod state;
+pub mod tree;
 pub mod ui;
 
 use crate::error::Result;
@@ -10,6 +11,7 @@ use ratatui::Terminal;
 use state::{AppState, ConfirmAction, Mode};
 use std::io;
 use std::time::{Duration, Instant};
+use tree::Sel;
 
 pub fn run() -> Result<()> {
     // Setup terminal
@@ -20,7 +22,8 @@ pub fn run() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = AppState::new();
-    app.refresh_forwards();
+    app.refresh_profiles();
+    app.refresh();
 
     let tick_rate = Duration::from_secs(1);
     let mut last_tick = Instant::now();
@@ -37,14 +40,18 @@ pub fn run() -> Result<()> {
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     break;
                 }
-                app.status_message = None;
+                if app.mode != Mode::Filter {
+                    app.status_message = None;
+                }
                 handle_key(&mut app, key.code);
             }
         }
 
         if last_tick.elapsed() >= tick_rate {
-            app.refresh_forwards();
-            // Refresh logs if viewing
+            // Profiles feed the machine list in `configured` mode, so pick up
+            // ones added from the CLI while the TUI is open.
+            app.refresh_profiles();
+            app.refresh();
             if app.mode == Mode::Logs {
                 let name = app.log_name.clone();
                 app.load_logs(&name);
@@ -71,6 +78,7 @@ fn handle_key(app: &mut AppState, key: KeyCode) {
         Mode::Logs => handle_logs_key(app, key),
         Mode::NewForward => handle_new_forward_key(app, key),
         Mode::ProfilePicker => handle_profile_picker_key(app, key),
+        Mode::Filter => handle_filter_key(app, key),
         Mode::Confirm(_) => handle_confirm_key(app, key),
     }
 }
@@ -80,42 +88,115 @@ fn handle_normal_key(app: &mut AppState, key: KeyCode) {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('j') | KeyCode::Down => app.select_next(),
         KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
+
+        // Folding
+        KeyCode::Enter | KeyCode::Char(' ') => app.toggle_expand(),
+        KeyCode::Right => app.expand_selected(),
+        KeyCode::Left => app.collapse_selected(),
+        KeyCode::Char('Z') => app.collapse_all(),
+
+        KeyCode::Char('/') => {
+            app.filter.clear();
+            app.mode = Mode::Filter;
+        }
+        KeyCode::Char('m') => app.cycle_machine_source(),
+
+        // Add a forward under the selected machine. The host is already known,
+        // which is why the form has no Host field.
+        KeyCode::Char('a') | KeyCode::Char('n') => {
+            if let Some(sel) = app.selected_sel() {
+                app.open_new_forward_form(sel.host().to_string());
+            }
+        }
+
+        KeyCode::Char('x') | KeyCode::Char('d') => match app.selected_sel() {
+            Some(Sel::Forward(_, name)) => {
+                app.mode = Mode::Confirm(ConfirmAction::StopForward(name));
+            }
+            Some(Sel::Machine(host)) => {
+                let count = app
+                    .selected_machine()
+                    .map(|m| m.forwards.len())
+                    .unwrap_or(0);
+                if count > 0 {
+                    app.mode = Mode::Confirm(ConfirmAction::StopHost(host, count));
+                } else {
+                    app.status_message = Some(format!("{host} has no forwards"));
+                }
+            }
+            None => {}
+        },
+
+        KeyCode::Char('r') => match app.selected_sel() {
+            Some(Sel::Forward(_, name)) => {
+                app.mode = Mode::Confirm(ConfirmAction::RestartForward(name));
+            }
+            Some(Sel::Machine(host)) => {
+                if app.selected_machine().is_some_and(|m| m.is_live()) {
+                    app.mode = Mode::Confirm(ConfirmAction::RestartHost(host));
+                } else {
+                    app.status_message = Some(format!("{host} is not connected"));
+                }
+            }
+            None => {}
+        },
+
+        // One log per machine, so either row kind opens the same one.
+        KeyCode::Char('l') => {
+            if let Some(sel) = app.selected_sel() {
+                let host = sel.host().to_string();
+                app.load_logs(&host);
+                app.mode = Mode::Logs;
+            }
+        }
+
         KeyCode::Char('s') => {
             app.refresh_profiles();
             if app.profiles.is_empty() {
-                app.status_message = Some("No saved profiles. Use 'pf config add' first.".to_string());
+                app.status_message = Some("No saved profiles".to_string());
             } else {
                 app.select_profile(0);
                 app.mode = Mode::ProfilePicker;
             }
         }
-        KeyCode::Char('n') => {
-            app.clear_input_form();
-            app.mode = Mode::NewForward;
-        }
-        KeyCode::Char('x') | KeyCode::Char('d') => {
-            if let Some(name) = app.selected_name() {
-                app.mode = Mode::Confirm(ConfirmAction::Stop(name));
-            }
-        }
-        KeyCode::Char('r') => {
-            if let Some(name) = app.selected_name() {
-                app.mode = Mode::Confirm(ConfirmAction::Restart(name));
-            }
-        }
-        KeyCode::Enter | KeyCode::Char('l') => {
-            if let Some(name) = app.selected_name() {
-                app.load_logs(&name);
-                app.mode = Mode::Logs;
-            }
-        }
+
         KeyCode::Char('o') => {
-            if let Some(fwd) = app.forwards.get(app.selected()) {
-                let url = format!("http://localhost:{}", fwd.local_port);
-                let cmd = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-                let _ = std::process::Command::new(cmd).arg(&url).spawn();
-                app.status_message = Some(format!("Opened {url}"));
+            if let Some(Sel::Forward(host, name)) = app.selected_sel() {
+                if let Some(machine) = app.machines.iter().find(|m| m.host == host) {
+                    if let Some(f) = machine.forwards.iter().find(|f| f.name == name) {
+                        let url = format!("http://localhost:{}", f.local_port);
+                        let cmd = if cfg!(target_os = "macos") {
+                            "open"
+                        } else {
+                            "xdg-open"
+                        };
+                        let _ = std::process::Command::new(cmd).arg(&url).spawn();
+                        app.status_message = Some(format!("Opened {url}"));
+                    }
+                }
             }
+        }
+        _ => {}
+    }
+}
+
+fn handle_filter_key(app: &mut AppState, key: KeyCode) {
+    match key {
+        KeyCode::Esc => {
+            app.filter.clear();
+            app.mode = Mode::Normal;
+            app.refresh();
+        }
+        KeyCode::Enter => {
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.filter.pop();
+            app.refresh();
+        }
+        KeyCode::Char(c) => {
+            app.filter.push(c);
+            app.refresh();
         }
         _ => {}
     }
@@ -126,9 +207,7 @@ fn handle_logs_key(app: &mut AppState, key: KeyCode) {
         KeyCode::Esc => app.mode = Mode::Normal,
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('j') | KeyCode::Down => {
-            if app.log_scroll < app.log_lines.len().saturating_sub(1) {
-                app.log_scroll += 1;
-            }
+            app.log_scroll = (app.log_scroll + 1).min(app.log_lines.len().saturating_sub(1));
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.log_scroll = app.log_scroll.saturating_sub(1);
@@ -137,93 +216,60 @@ fn handle_logs_key(app: &mut AppState, key: KeyCode) {
     }
 }
 
-fn advance_input_field(app: &mut AppState) {
-    // Pre-fill remote port from local port if empty
-    if app.input_field == state::InputField::LocalPort && app.input_remote_port.is_empty() {
-        app.input_remote_port = app.input_local_port.clone();
-    }
-    app.host_suggestions.clear();
-    app.host_suggestion_idx = None;
-    app.input_field = app.input_field.next();
-    if app.input_field == state::InputField::Host {
-        app.update_host_suggestions();
-    }
-}
-
 fn handle_new_forward_key(app: &mut AppState, key: KeyCode) {
     match key {
         KeyCode::Esc => app.mode = Mode::Normal,
-        KeyCode::Tab => {
-            if app.input_field == state::InputField::Host && !app.host_suggestions.is_empty() {
-                app.cycle_host_suggestion();
-            } else {
-                advance_input_field(app);
-            }
-        }
-        KeyCode::BackTab => {
-            app.host_suggestions.clear();
-            app.host_suggestion_idx = None;
-            app.input_field = app.input_field.prev();
-            if app.input_field == state::InputField::Host {
-                app.update_host_suggestions();
-            }
-        }
+        KeyCode::Tab => app.input_field = app.input_field.next(),
+        KeyCode::BackTab => app.input_field = app.input_field.prev(),
         KeyCode::Backspace => {
             app.current_input().pop();
-            if app.input_field == state::InputField::Host {
-                app.update_host_suggestions();
-            }
         }
         KeyCode::Char(c) => {
             app.current_input().push(c);
-            if app.input_field == state::InputField::Host {
-                app.update_host_suggestions();
-            }
         }
         KeyCode::Enter => {
-            // If not on the last field, advance to next field
             if app.input_field != state::InputField::Name {
-                advance_input_field(app);
+                app.input_field = app.input_field.next();
                 return;
             }
-            // On the last field: submit the form
-            let host = app.input_host.clone();
-            let name = if app.input_name.is_empty() {
-                None
-            } else {
-                Some(app.input_name.as_str())
-            };
-            let local_port: u16 = match app.input_local_port.parse() {
-                Ok(p) => p,
-                Err(_) => {
-                    app.status_message = Some("Invalid local port".to_string());
-                    return;
-                }
-            };
-            let remote_port: u16 = match app.input_remote_port.parse() {
-                Ok(p) => p,
-                Err(_) => {
-                    app.status_message = Some("Invalid remote port".to_string());
-                    return;
-                }
-            };
-            if host.is_empty() {
-                app.status_message = Some("Host is required".to_string());
-                return;
-            }
-            let effective_name = match name {
-                Some(n) => n.to_string(),
-                None => format!("{}-{}", host, local_port),
-            };
-            match actions::start_adhoc(&host, local_port, remote_port, name) {
-                Ok(msg) => app.status_message = Some(msg),
-                Err(msg) => app.status_message = Some(msg),
-            }
-            app.mode = Mode::Normal;
-            app.refresh_forwards();
-            app.select_by_name(&effective_name);
+            submit_new_forward(app);
         }
         _ => {}
+    }
+}
+
+fn submit_new_forward(app: &mut AppState) {
+    let host = app.input_host.clone();
+    let local: u16 = match app.input_local_port.trim().parse() {
+        Ok(p) => p,
+        Err(_) => {
+            app.status_message = Some("Local port must be a number".to_string());
+            return;
+        }
+    };
+    let remote: u16 = match app.input_remote_port.trim().parse() {
+        Ok(p) => p,
+        Err(_) => {
+            app.status_message = Some("Remote port must be a number".to_string());
+            return;
+        }
+    };
+
+    let name = app.input_name.trim().to_string();
+    let name = if name.is_empty() {
+        format!("{host}-{local}")
+    } else {
+        name
+    };
+
+    match actions::start_adhoc(&host, local, remote, Some(&name)) {
+        Ok(msg) => {
+            app.status_message = Some(msg);
+            app.mode = Mode::Normal;
+            app.refresh();
+            app.select_forward(&host, &name);
+        }
+        Err(msg) => app.status_message = Some(msg),
     }
 }
 
@@ -243,8 +289,10 @@ fn handle_profile_picker_key(app: &mut AppState, key: KeyCode) {
                     Err(msg) => app.status_message = Some(msg),
                 }
                 app.mode = Mode::Normal;
-                app.refresh_forwards();
-                app.select_by_name(&name);
+                app.refresh();
+                // A profile targets its own host, which may not be the machine
+                // the cursor was on, so follow the forward we just made.
+                app.select_forward(&host, &name);
             }
         }
         _ => {}
@@ -254,23 +302,21 @@ fn handle_profile_picker_key(app: &mut AppState, key: KeyCode) {
 fn handle_confirm_key(app: &mut AppState, key: KeyCode) {
     match key {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
-            let action = if let Mode::Confirm(action) = &app.mode {
-                action.clone()
-            } else {
+            let Mode::Confirm(action) = app.mode.clone() else {
                 return;
             };
-            match action {
-                ConfirmAction::Stop(name) => match actions::stop_forward(&name) {
-                    Ok(msg) => app.status_message = Some(msg),
-                    Err(msg) => app.status_message = Some(msg),
-                },
-                ConfirmAction::Restart(name) => match actions::restart_forward(&name) {
-                    Ok(msg) => app.status_message = Some(msg),
-                    Err(msg) => app.status_message = Some(msg),
-                },
-            }
+            let msg = match action {
+                ConfirmAction::StopForward(name) => actions::stop_forward(&name),
+                ConfirmAction::StopHost(host, _) => actions::stop_host(&host),
+                ConfirmAction::RestartForward(name) => actions::restart_forward(&name),
+                ConfirmAction::RestartHost(host) => actions::restart_host(&host),
+            };
+            app.status_message = Some(match msg {
+                Ok(m) => m,
+                Err(m) => m,
+            });
             app.mode = Mode::Normal;
-            app.refresh_forwards();
+            app.refresh();
         }
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
             app.mode = Mode::Normal;

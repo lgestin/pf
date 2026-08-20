@@ -17,9 +17,18 @@ fn default_remote_host() -> String {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+pub struct TuiConfig {
+    /// Which machines the tree lists.
+    #[serde(default)]
+    pub machine_source: crate::tui::tree::MachineListMode,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
+    #[serde(default)]
+    pub tui: TuiConfig,
 }
 
 impl Config {

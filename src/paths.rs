@@ -18,9 +18,6 @@ pub fn log_dir() -> Result<PathBuf> {
     Ok(base_dir()?.join("logs"))
 }
 
-pub fn log_file(name: &str) -> Result<PathBuf> {
-    Ok(log_dir()?.join(format!("{name}.log")))
-}
 
 /// Upper bound on a sanitized host key. Chosen so that
 /// `<home>/.pf/run/<key>.desired.json` stays comfortably inside the ~104-byte

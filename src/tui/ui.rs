@@ -1,13 +1,14 @@
 use super::state::{AppState, ConfirmAction, InputField, Mode};
+use super::tree::{MachineRow, Row};
 use crate::process;
-use crate::state::ForwardStatus;
-use chrono::Utc;
+use crate::session::{AttachStatus, SessionStatus};
+use chrono::{DateTime, Utc};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Paragraph, Row, Scrollbar,
-    ScrollbarOrientation, ScrollbarState, Table, Wrap,
+    Block, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Paragraph, Row as TRow,
+    Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Wrap,
 };
 use ratatui::Frame;
 
@@ -16,24 +17,26 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(8),
-            Constraint::Length(if matches!(app.mode, Mode::Normal) { 0 } else { 15 }),
+            Constraint::Length(if matches!(app.mode, Mode::Normal | Mode::Filter) {
+                0
+            } else {
+                15
+            }),
             Constraint::Length(1),
         ])
         .split(f.area());
 
-    render_forwards_table(f, app, chunks[0]);
+    render_tree(f, app, chunks[0]);
 
     let mode = app.mode.clone();
     match &mode {
         Mode::Logs => render_log_panel(f, app, chunks[1]),
         Mode::NewForward => render_new_forward_form(f, app, chunks[1]),
-        Mode::Normal => {}
-        Mode::ProfilePicker | Mode::Confirm(_) => {}
+        Mode::Normal | Mode::Filter | Mode::ProfilePicker | Mode::Confirm(_) => {}
     }
 
     render_status_bar(f, app, chunks[2]);
 
-    // Render overlays
     if matches!(mode, Mode::ProfilePicker) {
         render_profile_picker(f, app);
     } else if let Mode::Confirm(action) = &mode {
@@ -41,75 +44,149 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
     }
 }
 
-fn render_forwards_table(f: &mut Frame, app: &mut AppState, area: Rect) {
-    let header = Row::new(vec![
-        Cell::from("Name"),
-        Cell::from("Host"),
-        Cell::from("Ports"),
+/// Uptime for a machine row: how long the *current* master has held.
+fn session_uptime(machine: &MachineRow) -> String {
+    match machine.session.as_ref().and_then(|s| s.connected_at) {
+        Some(at) => format_since(at),
+        None => "-".to_string(),
+    }
+}
+
+fn format_since(at: DateTime<Utc>) -> String {
+    format_duration((Utc::now() - at).num_seconds())
+}
+
+fn machine_row(machine: &MachineRow, expanded: bool) -> TRow<'static> {
+    let marker = if machine.forwards.is_empty() {
+        " "
+    } else if expanded {
+        "▾"
+    } else {
+        "▸"
+    };
+
+    // Forward count rides in column 0 so a collapsed machine still shows its
+    // uptime — folding must not cost information.
+    let count = if machine.forwards.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", machine.forwards.len())
+    };
+    let label = format!("{marker} {}{count}", machine.host);
+
+    let (status, color) = match machine.session.as_ref().map(|s| s.status) {
+        Some(SessionStatus::Connected) => ("connected", Color::Green),
+        Some(SessionStatus::Connecting) => ("connecting", Color::Yellow),
+        Some(SessionStatus::Reconnecting) => ("reconnecting", Color::Yellow),
+        Some(SessionStatus::Failed) => ("failed", Color::Red),
+        None => ("idle", Color::DarkGray),
+    };
+
+    let alive = machine
+        .session
+        .as_ref()
+        .is_some_and(|s| process::is_alive(s.watcher_pid));
+    let (status, color) = if machine.session.is_some() && !alive {
+        ("failed", Color::Red)
+    } else {
+        (status, color)
+    };
+
+    let reconnects = match machine.session.as_ref() {
+        Some(s) if s.reconnect_count > 0 => format!("↻{}", s.reconnect_count),
+        Some(_) => "↻0".to_string(),
+        None => "-".to_string(),
+    };
+
+    TRow::new(vec![
+        Cell::from(label).style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from(status).style(Style::default().fg(color)),
+        Cell::from(session_uptime(machine)),
+        Cell::from(reconnects).style(Style::default().fg(Color::DarkGray)),
+    ])
+}
+
+fn forward_row(machine: &MachineRow, fi: usize) -> TRow<'static> {
+    let f = &machine.forwards[fi];
+    let label = format!("    {} → {}:{}", f.local_port, f.remote_host, f.remote_port);
+
+    let (status, color) = match f.status {
+        AttachStatus::Attached => ("attached", Color::Green),
+        AttachStatus::Pending => ("pending", Color::Yellow),
+        AttachStatus::Failed => ("failed", Color::Red),
+    };
+
+    let uptime = match f.attached_at {
+        Some(at) => format_since(at),
+        None => "-".to_string(),
+    };
+
+    // A failed attach has an error worth surfacing; it replaces the uptime,
+    // which would be "-" anyway.
+    let detail = if f.status == AttachStatus::Failed {
+        f.error
+            .as_deref()
+            .map(short_error)
+            .unwrap_or_else(|| uptime.clone())
+    } else {
+        uptime
+    };
+
+    TRow::new(vec![
+        Cell::from(label).style(Style::default().fg(Color::Gray)),
+        Cell::from(status).style(Style::default().fg(color)),
+        Cell::from(detail),
+        Cell::from(""),
+    ])
+}
+
+/// ssh's stderr can be several lines; the table has one narrow cell.
+fn short_error(err: &str) -> String {
+    let first = err.lines().next().unwrap_or(err).trim();
+    if first.len() > 24 {
+        format!("{}…", &first[..23])
+    } else {
+        first.to_string()
+    }
+}
+
+fn render_tree(f: &mut Frame, app: &mut AppState, area: Rect) {
+    let header = TRow::new(vec![
+        Cell::from("Machine / Forward"),
         Cell::from("Status"),
         Cell::from("Uptime"),
         Cell::from("Reconn"),
-        Cell::from("PIDs"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
 
-    let rows: Vec<Row> = app
-        .forwards
+    let rows: Vec<TRow> = app
+        .rows
         .iter()
-        .map(|fwd| {
-            let alive = process::is_alive(fwd.watcher_pid);
-            let status = if alive {
-                &fwd.status
-            } else {
-                &ForwardStatus::Failed
-            };
-
-            let status_color = match status {
-                ForwardStatus::Running => Color::Green,
-                ForwardStatus::Reconnecting => Color::Yellow,
-                ForwardStatus::Failed => Color::Red,
-                ForwardStatus::Stopped => Color::DarkGray,
-            };
-
-            let uptime = if alive {
-                let dur = Utc::now() - fwd.started_at;
-                format_duration(dur.num_seconds())
-            } else {
-                "-".to_string()
-            };
-
-            let ports = format!("{}:{}", fwd.local_port, fwd.remote_port);
-            let pids = if alive {
-                match fwd.ssh_pid {
-                    Some(ssh) => format!("w:{} s:{}", fwd.watcher_pid, ssh),
-                    None => format!("w:{}", fwd.watcher_pid),
-                }
-            } else {
-                "-".to_string()
-            };
-
-            Row::new(vec![
-                Cell::from(fwd.name.clone()),
-                Cell::from(fwd.host.clone()),
-                Cell::from(ports),
-                Cell::from(status.to_string()).style(Style::default().fg(status_color)),
-                Cell::from(uptime),
-                Cell::from(fwd.reconnect_count.to_string()),
-                Cell::from(pids),
-            ])
+        .filter_map(|row| match row {
+            Row::Machine(mi) => {
+                let machine = app.machines.get(*mi)?;
+                Some(machine_row(machine, app.expanded.contains(&machine.host)))
+            }
+            Row::Forward(mi, fi) => {
+                let machine = app.machines.get(*mi)?;
+                (*fi < machine.forwards.len()).then(|| forward_row(machine, *fi))
+            }
         })
         .collect();
+
+    let title = if app.filter.is_empty() {
+        format!(" Machines ({}) ", app.machine_source.label())
+    } else {
+        format!(" Machines — filter: {} ", app.filter)
+    };
 
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(15),
-            Constraint::Percentage(20),
-            Constraint::Percentage(12),
-            Constraint::Percentage(13),
-            Constraint::Percentage(12),
-            Constraint::Percentage(10),
-            Constraint::Percentage(18),
+            Constraint::Fill(1),
+            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Length(7),
         ],
     )
     .header(header)
@@ -120,21 +197,19 @@ fn render_forwards_table(f: &mut Frame, app: &mut AppState, area: Rect) {
     )
     .highlight_symbol("› ")
     .highlight_spacing(HighlightSpacing::Always)
-    .block(Block::default().title(" Forwards ").borders(Borders::ALL));
+    .block(Block::default().title(title).borders(Borders::ALL));
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 
-    // Scrollbar, drawn inside the block's right border.
-    let visible = area.height.saturating_sub(3) as usize; // borders + header
-    if app.forwards.len() > visible {
-        let mut sb_state =
-            ScrollbarState::new(app.forwards.len()).position(app.table_state.offset());
+    let visible = area.height.saturating_sub(3) as usize;
+    if app.rows.len() > visible {
+        let mut sb = ScrollbarState::new(app.rows.len()).position(app.table_state.offset());
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None),
             area,
-            &mut sb_state,
+            &mut sb,
         );
     }
 }
@@ -152,7 +227,7 @@ fn render_log_panel(f: &mut Frame, app: &AppState, area: Rect) {
     let para = Paragraph::new(lines)
         .block(
             Block::default()
-                .title(format!(" Logs: {} ", app.log_name))
+                .title(format!(" Session log: {} ", app.log_name))
                 .borders(Borders::ALL),
         )
         .wrap(Wrap { trim: false });
@@ -162,85 +237,34 @@ fn render_log_panel(f: &mut Frame, app: &AppState, area: Rect) {
 
 fn render_new_forward_form(f: &mut Frame, app: &AppState, area: Rect) {
     let block = Block::default()
-        .title(" New Forward ")
+        .title(format!(" New forward on {} ", app.input_host))
         .borders(Borders::ALL);
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Extra rows for host suggestions
-    let suggestion_rows = if app.input_field == InputField::Host && !app.host_suggestions.is_empty() {
-        app.host_suggestions.len().min(5) as u16
-    } else {
-        0
-    };
-
-    let mut constraints = vec![
-        Constraint::Length(1), // Host
-    ];
-    if suggestion_rows > 0 {
-        constraints.push(Constraint::Length(suggestion_rows));
-    }
-    constraints.extend([
-        Constraint::Length(1), // LocalPort
-        Constraint::Length(1), // RemotePort
-        Constraint::Length(1), // Name
-        Constraint::Length(1), // Hint
-        Constraint::Min(0),
-    ]);
-
     let fields = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
         .split(inner);
 
-    // Host field
-    let host_active = app.input_field == InputField::Host;
-    let host_style = if host_active {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-    let host_cursor = if host_active { "_" } else { "" };
-    let host_line = Line::from(vec![
-        Span::styled(format!("{:>12}: ", "Host"), host_style),
-        Span::raw(format!("{}{host_cursor}", app.input_host)),
-    ]);
-    f.render_widget(Paragraph::new(host_line), fields[0]);
-
-    // Host suggestions (if active and available)
-    let offset = if suggestion_rows > 0 {
-        let suggestions: Vec<Line> = app
-            .host_suggestions
-            .iter()
-            .take(5)
-            .enumerate()
-            .map(|(i, h)| {
-                let marker = if app.host_suggestion_idx == Some(i) { "> " } else { "  " };
-                let style = if app.host_suggestion_idx == Some(i) {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                Line::from(Span::styled(format!("{:>12}  {marker}{h}", ""), style))
-            })
-            .collect();
-        f.render_widget(Paragraph::new(suggestions), fields[1]);
-        2 // skip fields[0] (host) and fields[1] (suggestions)
-    } else {
-        1 // skip fields[0] (host) only
-    };
-
-    // Remaining fields
-    let remaining = [
+    let entries = [
         (InputField::LocalPort, &app.input_local_port),
         (InputField::RemotePort, &app.input_remote_port),
         (InputField::Name, &app.input_name),
     ];
 
-    for (i, (field, value)) in remaining.iter().enumerate() {
+    for (i, (field, value)) in entries.iter().enumerate() {
         let active = *field == app.input_field;
         let style = if active {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -249,22 +273,21 @@ fn render_new_forward_form(f: &mut Frame, app: &AppState, area: Rect) {
             Span::styled(format!("{:>12}: ", field.label()), style),
             Span::raw(format!("{value}{cursor}")),
         ]);
-        f.render_widget(Paragraph::new(line), fields[offset + i]);
+        f.render_widget(Paragraph::new(line), fields[i]);
     }
 
-    let hint_text = if app.input_field == InputField::Host && !app.host_suggestions.is_empty() {
-        "  Tab: cycle hosts | Enter: next field | Esc: cancel"
-    } else if app.input_field == InputField::Name {
+    let hint = if app.input_field == InputField::Name {
         "  Tab: next field | Enter: submit | Esc: cancel"
     } else {
         "  Tab: next field | Enter: next field | Esc: cancel"
     };
-    let hint = Line::from(Span::styled(
-        hint_text,
-        Style::default().fg(Color::DarkGray),
-    ));
-    // offset + 3 remaining fields = hint row index
-    f.render_widget(Paragraph::new(hint), fields[offset + 3]);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(Color::DarkGray),
+        ))),
+        fields[3],
+    );
 }
 
 fn render_profile_picker(f: &mut Frame, app: &mut AppState) {
@@ -300,32 +323,41 @@ fn render_profile_picker(f: &mut Frame, app: &mut AppState) {
 }
 
 fn render_confirm_dialog(f: &mut Frame, action: &ConfirmAction) {
-    let area = centered_rect(40, 20, f.area());
+    let area = centered_rect(46, 20, f.area());
     f.render_widget(Clear, area);
 
     let msg = match action {
-        ConfirmAction::Stop(name) => format!("Stop '{name}'? (y/n)"),
-        ConfirmAction::Restart(name) => format!("Restart '{name}'? (y/n)"),
+        ConfirmAction::StopForward(name) => format!("Stop '{name}'? (y/n)"),
+        ConfirmAction::StopHost(host, n) => {
+            format!("Stop all {n} forward(s) on '{host}'? (y/n)")
+        }
+        ConfirmAction::RestartForward(name) => format!("Restart '{name}'? (y/n)"),
+        ConfirmAction::RestartHost(host) => {
+            format!("Reconnect '{host}'? All its forwards drop briefly. (y/n)")
+        }
     };
 
-    let para = Paragraph::new(msg).block(
-        Block::default()
-            .title(" Confirm ")
-            .borders(Borders::ALL),
-    );
+    let para = Paragraph::new(msg)
+        .wrap(Wrap { trim: true })
+        .block(Block::default().title(" Confirm ").borders(Borders::ALL));
     f.render_widget(para, area);
 }
 
 fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
     let hint = match &app.mode {
-        Mode::Normal => "j/k:nav  s:start profile  n:new  x:stop  r:restart  l:logs  o:open  q:quit",
+        Mode::Normal => {
+            "j/k:nav  ↵:fold  a:add  x:stop  r:restart  l:logs  /:filter  m:mode  s:profile  q:quit"
+        }
         Mode::Logs => "j/k:scroll  Esc:back  q:quit",
-        Mode::NewForward => "Tab:complete/next  Enter:next/submit  Esc:cancel",
+        Mode::NewForward => "Tab:next  Enter:next/submit  Esc:cancel",
         Mode::ProfilePicker => "j/k:nav  Enter:start  Esc:cancel",
+        Mode::Filter => "type to filter  Enter:apply  Esc:clear",
         Mode::Confirm(_) => "y:confirm  n/Esc:cancel",
     };
 
-    let text = if let Some(msg) = &app.status_message {
+    let text = if app.mode == Mode::Filter {
+        format!("/{}_  |  {hint}", app.filter)
+    } else if let Some(msg) = &app.status_message {
         format!("{msg}  |  {hint}")
     } else {
         hint.to_string()
@@ -377,31 +409,53 @@ fn format_duration(total_secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{ForwardState, ForwardStatus};
+    use crate::session::{ForwardObs, SessionState};
+    use crate::tui::tree::{self, MachineListMode};
+    use crate::watcher::RetryPolicy;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use std::collections::BTreeSet;
 
-    fn fake_forward(i: usize) -> ForwardState {
-        ForwardState {
-            name: format!("fwd-{i:02}"),
-            host: "example".to_string(),
-            local_port: 8000 + i as u16,
-            remote_port: 80,
+    fn obs(name: &str, port: u16, status: AttachStatus) -> ForwardObs {
+        ForwardObs {
+            name: name.to_string(),
+            local_port: port,
             remote_host: "localhost".to_string(),
-            // our own pid, so `process::is_alive` reports the row as running
-            watcher_pid: std::process::id(),
-            ssh_pid: None,
-            status: ForwardStatus::Running,
-            started_at: chrono::Utc::now(),
-            reconnect_count: 0,
-            auto_reconnect: true,
-            max_retries: 0,
-            retry_delay: 5,
-            max_retry_delay: 300,
+            remote_port: port,
+            status,
+            attached_at: Some(Utc::now()),
+            error: None,
         }
     }
 
-    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+    fn live(host: &str, forwards: Vec<ForwardObs>) -> SessionState {
+        let mut s = SessionState::new(host.to_string(), std::process::id(), true, RetryPolicy::default());
+        s.status = SessionStatus::Connected;
+        s.connected_at = Some(Utc::now());
+        s.forwards = forwards;
+        s
+    }
+
+    fn app_with(sessions: Vec<SessionState>, ssh_hosts: &[&str]) -> AppState {
+        let mut app = AppState::new();
+        app.ssh_hosts = ssh_hosts.iter().map(|h| h.to_string()).collect();
+        app.machine_source = MachineListMode::AllHosts;
+        app.machines = tree::build_machines(
+            sessions,
+            &BTreeSet::new(),
+            &app.ssh_hosts,
+            MachineListMode::AllHosts,
+            "",
+        );
+        app.expanded = tree::default_expanded(&app.machines);
+        app.rows = tree::flatten(&app.machines, &app.expanded);
+        app.table_state.select(Some(0));
+        app
+    }
+
+    fn draw(app: &mut AppState, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render(f, app)).unwrap();
         terminal
             .backend()
             .buffer()
@@ -412,93 +466,125 @@ mod tests {
     }
 
     #[test]
+    fn an_expanded_machine_shows_its_forwards_indented() {
+        let mut app = app_with(
+            vec![live("gpu-01", vec![obs("jupyter", 8888, AttachStatus::Attached)])],
+            &[],
+        );
+        let text = draw(&mut app, 90, 12);
+
+        assert!(text.contains("gpu-01"), "machine row missing:\n{text}");
+        assert!(text.contains("▾"), "expanded marker missing:\n{text}");
+        assert!(text.contains("(1)"), "forward count missing:\n{text}");
+        assert!(text.contains("8888 → localhost:8888"), "forward row missing:\n{text}");
+        assert!(text.contains("connected"), "session status missing:\n{text}");
+        assert!(text.contains("attached"), "attach status missing:\n{text}");
+    }
+
+    #[test]
+    fn a_collapsed_machine_hides_forwards_but_keeps_its_own_row() {
+        let mut app = app_with(
+            vec![live("gpu-01", vec![obs("jupyter", 8888, AttachStatus::Attached)])],
+            &[],
+        );
+        app.expanded.clear();
+        app.rows = tree::flatten(&app.machines, &app.expanded);
+
+        let text = draw(&mut app, 90, 12);
+        assert!(text.contains("gpu-01"), "machine row vanished:\n{text}");
+        assert!(text.contains("▸"), "collapsed marker missing:\n{text}");
+        assert!(!text.contains("8888 → localhost"), "forward leaked while collapsed:\n{text}");
+        // Folding must not cost information: the count still shows.
+        assert!(text.contains("(1)"), "forward count lost when collapsed:\n{text}");
+    }
+
+    #[test]
+    fn idle_hosts_render_without_a_session() {
+        let mut app = app_with(vec![], &["nas", "bastion"]);
+        let text = draw(&mut app, 90, 12);
+        assert!(text.contains("nas"), "idle host missing:\n{text}");
+        assert!(text.contains("idle"), "idle status missing:\n{text}");
+    }
+
+    #[test]
+    fn a_failed_forward_shows_its_error_instead_of_an_uptime() {
+        let mut f = obs("boom", 6006, AttachStatus::Failed);
+        f.attached_at = None;
+        f.error = Some("bind [127.0.0.1]:6006: Address already in use".to_string());
+
+        let mut app = app_with(vec![live("gpu-01", vec![f])], &[]);
+        let text = draw(&mut app, 100, 12);
+        assert!(text.contains("failed"), "failed status missing:\n{text}");
+        assert!(text.contains("bind"), "error text missing:\n{text}");
+    }
+
+    #[test]
     fn selection_past_the_viewport_scrolls_into_view() {
-        let mut app = AppState::new();
-        app.forwards = (0..40).map(fake_forward).collect();
+        let sessions: Vec<SessionState> = (0..40)
+            .map(|i| live(&format!("host-{i:02}"), vec![]))
+            .collect();
+        let mut app = app_with(sessions, &[]);
         app.select(39);
 
-        let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
-        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let text = draw(&mut app, 90, 12);
+        assert!(text.contains("host-39"), "selected row not rendered:\n{text}");
+        assert!(!text.contains("host-00"), "viewport did not scroll:\n{text}");
+    }
 
-        let text = buffer_text(&terminal);
-        assert!(text.contains("fwd-39"), "selected row not rendered:\n{text}");
-        assert!(
-            !text.contains("fwd-00"),
-            "viewport did not scroll away from the top:\n{text}"
+    #[test]
+    fn the_filter_shows_in_the_title() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &[]);
+        app.filter = "gpu".to_string();
+        let text = draw(&mut app, 90, 12);
+        assert!(text.contains("filter: gpu"), "filter not shown:\n{text}");
+    }
+
+    /// Not an assertion — prints the layout so it can be eyeballed.
+    /// `cargo test preview_layout -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn preview_layout() {
+        let mut gpu1 = live(
+            "gpu-01",
+            vec![
+                obs("jupyter", 8888, AttachStatus::Attached),
+                obs("tensorboard", 6006, AttachStatus::Attached),
+            ],
         );
-    }
+        gpu1.reconnect_count = 1;
 
-    #[test]
-    fn navigation_wraps_at_both_ends() {
-        let mut app = AppState::new();
-        app.forwards = (0..3).map(fake_forward).collect();
+        let mut boom = obs("db", 5432, AttachStatus::Failed);
+        boom.attached_at = None;
+        boom.error = Some("bind [127.0.0.1]:5432: Address already in use".to_string());
+        let gpu2 = live("gpu-02", vec![obs("api", 3000, AttachStatus::Attached), boom]);
 
-        app.select(2);
-        app.select_next();
-        assert_eq!(app.selected(), 0, "next past the end should wrap to 0");
+        let mut app = app_with(vec![gpu1, gpu2], &["bastion", "nas", "dev-box"]);
+        app.expanded.remove("gpu-02");
+        app.rows = tree::flatten(&app.machines, &app.expanded);
+        app.select(1);
 
-        app.select_prev();
-        assert_eq!(app.selected(), 2, "prev before 0 should wrap to the last");
-    }
-
-    #[test]
-    fn navigation_on_an_empty_list_does_not_panic() {
-        let mut app = AppState::new();
-        app.forwards.clear();
-        app.select_next();
-        app.select_prev();
-        assert_eq!(app.selected(), 0);
-    }
-
-    #[test]
-    fn profile_picker_scrolls_to_the_selected_profile() {
-        let mut app = AppState::new();
-        app.profiles = (0..40)
-            .map(|i| {
-                (
-                    format!("prof-{i:02}"),
-                    crate::config::Profile {
-                        host: "example".to_string(),
-                        local_port: 9000 + i as u16,
-                        remote_port: 80,
-                        remote_host: "localhost".to_string(),
-                    },
-                )
-            })
-            .collect();
-        app.mode = Mode::ProfilePicker;
-        app.select_profile(39);
-
-        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(76, 12)).unwrap();
         terminal.draw(|f| render(f, &mut app)).unwrap();
-
-        let text = buffer_text(&terminal);
-        assert!(text.contains("prof-39"), "selected profile not rendered:\n{text}");
-        assert!(!text.contains("prof-00"), "picker did not scroll:\n{text}");
+        let buf = terminal.backend().buffer();
+        println!();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect();
+            println!("{}", line.trim_end());
+        }
+        println!();
     }
 
     #[test]
-    fn profile_navigation_wraps() {
-        let mut app = AppState::new();
-        app.profiles = (0..3)
-            .map(|i| {
-                (
-                    format!("prof-{i}"),
-                    crate::config::Profile {
-                        host: "example".to_string(),
-                        local_port: 9000 + i as u16,
-                        remote_port: 80,
-                        remote_host: "localhost".to_string(),
-                    },
-                )
-            })
-            .collect();
+    fn the_add_form_names_its_machine_and_has_no_host_field() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &[]);
+        app.open_new_forward_form("gpu-01".to_string());
 
-        app.select_profile(2);
-        app.select_next_profile();
-        assert_eq!(app.profile_selected(), 0);
-
-        app.select_prev_profile();
-        assert_eq!(app.profile_selected(), 2);
+        let text = draw(&mut app, 90, 24);
+        assert!(text.contains("New forward on gpu-01"), "host not in title:\n{text}");
+        assert!(text.contains("Local Port"), "port field missing:\n{text}");
+        // The machine list is the host picker now; the form must not ask again.
+        assert!(!text.contains("Host:"), "form still asks for a host:\n{text}");
     }
 }
