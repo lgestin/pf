@@ -32,6 +32,9 @@ pub enum PfError {
     #[error("Invalid port mapping: {0}")]
     InvalidPortMapping(String),
 
+    #[error("Could not lock session for host '{0}': {1}")]
+    Lock(String, String),
+
     #[error("{0}")]
     Other(String),
 }
