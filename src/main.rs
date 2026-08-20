@@ -4,6 +4,7 @@ mod display;
 mod error;
 mod paths;
 mod process;
+mod session;
 pub mod ssh_hosts;
 mod state;
 mod tunnel;

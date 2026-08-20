@@ -32,7 +32,7 @@ macro_rules! wlog {
 const HEALTHY_UPTIME_SECS: u64 = 60;
 
 /// Retry pacing for a watcher's reconnect loop.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RetryPolicy {
     /// Max reconnect attempts (0 = unlimited).
     pub max_retries: u32,
