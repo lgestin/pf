@@ -337,6 +337,9 @@ fn render_tree(f: &mut Frame, app: &mut AppState, area: Rect) {
     f.render_stateful_widget(table, area, &mut app.table_state);
 
     let visible = area.height.saturating_sub(3) as usize;
+    // Remembered so PageUp/PageDown and ctrl-d/u can move by what a "page"
+    // actually is on this terminal.
+    app.tree_visible = visible;
     if app.rows.len() > visible {
         let mut sb = ScrollbarState::new(app.rows.len()).position(app.table_state.offset());
         // Inset vertically so the track cannot paint over the block's corners.

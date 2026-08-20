@@ -57,6 +57,8 @@ pub struct AppState {
     pub sel: Option<Sel>,
     pub machine_source: MachineListMode,
     pub filter: String,
+    /// Rows the tree viewport held at the last render; the paging distance.
+    pub tree_visible: usize,
     /// True until the first refresh, which seeds the fold state.
     first_refresh: bool,
 
@@ -99,6 +101,7 @@ impl AppState {
             sel: None,
             machine_source,
             filter: String::new(),
+            tree_visible: 20,
             first_refresh: true,
             profiles: Vec::new(),
             profile_state: ListState::default().with_selected(Some(0)),
@@ -141,6 +144,29 @@ impl AppState {
         let last = self.rows.len() - 1;
         let prev = self.selected().checked_sub(1).unwrap_or(last);
         self.select(prev);
+    }
+
+    /// Jump or page by `delta` rows, pinning to the ends. Wrap-around is fine
+    /// one row at a time but disorienting on a page jump.
+    pub fn select_by(&mut self, delta: isize) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let last = self.rows.len() as isize - 1;
+        let target = (self.selected() as isize + delta).clamp(0, last);
+        self.select(target as usize);
+    }
+
+    pub fn select_first(&mut self) {
+        if !self.rows.is_empty() {
+            self.select(0);
+        }
+    }
+
+    pub fn select_last(&mut self) {
+        if !self.rows.is_empty() {
+            self.select(self.rows.len() - 1);
+        }
     }
 
     pub fn selected_sel(&self) -> Option<Sel> {

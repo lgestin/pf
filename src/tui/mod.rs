@@ -4,7 +4,7 @@ pub mod tree;
 pub mod ui;
 
 use crate::error::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -43,7 +43,7 @@ pub fn run() -> Result<()> {
                 if app.mode != Mode::Filter {
                     app.status_message = None;
                 }
-                handle_key(&mut app, key.code);
+                handle_key(&mut app, key);
             }
         }
 
@@ -72,22 +72,38 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn handle_key(app: &mut AppState, key: KeyCode) {
+fn handle_key(app: &mut AppState, key: KeyEvent) {
     match &app.mode {
         Mode::Normal => handle_normal_key(app, key),
-        Mode::Logs => handle_logs_key(app, key),
-        Mode::NewForward => handle_new_forward_key(app, key),
-        Mode::ProfilePicker => handle_profile_picker_key(app, key),
-        Mode::Filter => handle_filter_key(app, key),
-        Mode::Confirm(_) => handle_confirm_key(app, key),
+        Mode::Logs => handle_logs_key(app, key.code),
+        Mode::NewForward => handle_new_forward_key(app, key.code),
+        Mode::ProfilePicker => handle_profile_picker_key(app, key.code),
+        Mode::Filter => handle_filter_key(app, key.code),
+        Mode::Confirm(_) => handle_confirm_key(app, key.code),
     }
 }
 
-fn handle_normal_key(app: &mut AppState, key: KeyCode) {
-    match key {
+fn handle_normal_key(app: &mut AppState, key: KeyEvent) {
+    // Half a page, and never zero, so ctrl-d/u still move on a tiny terminal.
+    let half_page = (app.tree_visible / 2).max(1) as isize;
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('d') => app.select_by(half_page),
+            KeyCode::Char('u') => app.select_by(-half_page),
+            _ => {}
+        }
+        return;
+    }
+
+    match key.code {
         KeyCode::Char('q') => app.should_quit = true,
         KeyCode::Char('j') | KeyCode::Down => app.select_next(),
         KeyCode::Char('k') | KeyCode::Up => app.select_prev(),
+        KeyCode::Char('g') | KeyCode::Home => app.select_first(),
+        KeyCode::Char('G') | KeyCode::End => app.select_last(),
+        KeyCode::PageDown => app.select_by(app.tree_visible.max(1) as isize),
+        KeyCode::PageUp => app.select_by(-(app.tree_visible.max(1) as isize)),
 
         // Folding
         KeyCode::Enter | KeyCode::Char(' ') => app.toggle_expand(),
@@ -372,6 +388,63 @@ mod tests {
         app
     }
 
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::from(code)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn app_with_n_hosts(n: usize) -> AppState {
+        let hosts: Vec<String> = (0..n).map(|i| format!("host-{i:02}")).collect();
+        let refs: Vec<&str> = hosts.iter().map(|h| h.as_str()).collect();
+        app_with_hosts(&refs)
+    }
+
+    #[test]
+    fn g_and_shift_g_jump_to_the_ends_of_the_list() {
+        let mut app = app_with_n_hosts(30);
+        app.select(5);
+
+        handle_key(&mut app, key(KeyCode::Char('G')));
+        assert_eq!(app.selected(), 29, "G should jump to the last row");
+
+        handle_key(&mut app, key(KeyCode::Char('g')));
+        assert_eq!(app.selected(), 0, "g should jump to the first row");
+    }
+
+    #[test]
+    fn page_keys_move_by_the_viewport_and_clamp_at_the_ends() {
+        let mut app = app_with_n_hosts(30);
+        app.tree_visible = 10;
+
+        handle_key(&mut app, key(KeyCode::PageDown));
+        assert_eq!(app.selected(), 10, "PageDown should move a full viewport");
+
+        // Near the end, paging pins to the last row rather than wrapping —
+        // wrap-around on a page jump is disorienting in a long list.
+        app.select(25);
+        handle_key(&mut app, key(KeyCode::PageDown));
+        assert_eq!(app.selected(), 29, "PageDown should clamp, not wrap");
+
+        app.select(3);
+        handle_key(&mut app, key(KeyCode::PageUp));
+        assert_eq!(app.selected(), 0, "PageUp should clamp at the top");
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_u_move_half_a_viewport() {
+        let mut app = app_with_n_hosts(30);
+        app.tree_visible = 10;
+
+        handle_key(&mut app, ctrl('d'));
+        assert_eq!(app.selected(), 5, "ctrl-d should move half a viewport");
+
+        handle_key(&mut app, ctrl('u'));
+        assert_eq!(app.selected(), 0, "ctrl-u should move back up");
+    }
+
     #[test]
     fn esc_in_normal_mode_clears_an_applied_filter() {
         // The empty state promises "Esc clears the filter" — that has to hold
@@ -380,7 +453,7 @@ mod tests {
         let mut app = app_with_hosts(&["gpu-01", "nas"]);
         app.filter = "gpu".to_string();
 
-        handle_key(&mut app, KeyCode::Esc);
+        handle_key(&mut app, KeyEvent::from(KeyCode::Esc));
 
         assert!(app.filter.is_empty(), "Esc should clear the applied filter");
         assert_eq!(app.mode, Mode::Normal);
