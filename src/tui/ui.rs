@@ -14,11 +14,15 @@ use ratatui::Frame;
 
 // Palette. Named ANSI colors rather than RGB, so the tree inherits whatever
 // theme the user's terminal already uses instead of fighting it.
+//
+// Deliberately *not* DarkGray: it maps to ANSI bright-black, which on plenty of
+// themes sits a shade off the background and makes anything wearing it
+// effectively invisible. Gray is ANSI 7 — recessive but always legible.
 const ACCENT: Color = Color::Cyan;
 const OK: Color = Color::Green;
 const WARN: Color = Color::Yellow;
 const BAD: Color = Color::Red;
-const MUTE: Color = Color::DarkGray;
+const MUTE: Color = Color::Gray;
 
 fn mute() -> Style {
     Style::default().fg(MUTE)
@@ -323,7 +327,9 @@ fn render_tree(f: &mut Frame, app: &mut AppState, area: Rect) {
     )
     .header(header)
     .column_spacing(1)
-    .row_highlight_style(Style::default().bg(Color::Indexed(236)))
+    // A plain 8-colour background rather than an indexed shade: it renders on
+    // any theme, where a 256-colour dark grey assumes a dark one.
+    .row_highlight_style(Style::default().bg(Color::DarkGray))
     // A solid rail reads as a cursor; a chevron reads as a bullet and fights
     // the tree guides.
     .highlight_symbol(Span::styled("▌", Style::default().fg(ACCENT)))
@@ -545,16 +551,20 @@ fn render_confirm_dialog(f: &mut Frame, action: &ConfirmAction) {
     f.render_widget(para, area);
 }
 
-/// Keys carry the accent, their descriptions recede — the eye should find the
-/// key it wants without reading the whole line.
+/// Keys carry the accent so the eye can find one without reading the line, but
+/// the descriptions stay at full foreground — this is the menu, and a menu you
+/// cannot read is not a menu.
 fn keys(pairs: &[(&'static str, &'static str)]) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (i, (key, what)) in pairs.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled("  ", mute()));
+            spans.push(Span::raw("  "));
         }
-        spans.push(Span::styled(*key, Style::default().fg(ACCENT)));
-        spans.push(Span::styled(format!(" {what}"), mute()));
+        spans.push(Span::styled(
+            *key,
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw(format!(" {what}")));
     }
     spans
 }
@@ -762,6 +772,51 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn the_menu_is_readable_and_its_keys_are_accented() {
+        let mut app = app_with(vec![], &["nas"]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 10)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        // Descriptions sit at the terminal's own foreground. Dimming them once
+        // made the menu vanish on themes where bright-black ≈ background.
+        let desc = fg_of(&terminal, "move").expect("menu not rendered");
+        assert_eq!(desc, Color::Reset, "menu text is dimmed and can disappear");
+
+        // The key itself is what the eye hunts for, so it keeps the accent.
+        let key = fg_of(&terminal, "j/k").expect("menu key not rendered");
+        assert_eq!(key, ACCENT, "menu keys lost their accent");
+    }
+
+    #[test]
+    fn no_ansi_bright_black_anywhere() {
+        // DarkGray is a shade off the background on plenty of themes. Nothing
+        // in the tree should depend on it being legible.
+        let mut f = obs("boom", 5432, AttachStatus::Failed);
+        f.attached_at = None;
+        f.error = Some("bind: Address already in use".to_string());
+        let mut app = app_with(
+            vec![live("gpu-01", vec![obs("a", 8888, AttachStatus::Forwarded), f])],
+            &["nas", "bastion"],
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        let buf = terminal.backend().buffer();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                assert_ne!(
+                    cell.fg,
+                    Color::DarkGray,
+                    "bright-black text at ({x},{y}): {:?}",
+                    cell.symbol()
+                );
+            }
+        }
     }
 
     #[test]
