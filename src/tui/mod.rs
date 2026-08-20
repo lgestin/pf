@@ -80,6 +80,9 @@ fn handle_key(app: &mut AppState, key: KeyEvent) {
         Mode::ProfilePicker => handle_profile_picker_key(app, key.code),
         Mode::Filter => handle_filter_key(app, key.code),
         Mode::Confirm(_) => handle_confirm_key(app, key.code),
+        // Any key closes help — and is swallowed, so a key you were reading
+        // about does not fire the moment you dismiss the overlay.
+        Mode::Help => app.mode = Mode::Normal,
     }
 }
 
@@ -123,6 +126,7 @@ fn handle_normal_key(app: &mut AppState, key: KeyEvent) {
             }
         }
         KeyCode::Char('m') => app.cycle_machine_source(),
+        KeyCode::Char('?') => app.mode = Mode::Help,
 
         // Add a forward under the selected machine. The host is already known,
         // which is why the form has no Host field.
@@ -507,6 +511,19 @@ mod tests {
         app.rows = tree::flatten(&app.machines, &app.expanded);
         app.select(1); // the forward row
         app
+    }
+
+    #[test]
+    fn question_mark_opens_help_and_any_key_closes_it() {
+        let mut app = app_with_hosts(&["nas"]);
+
+        handle_key(&mut app, key(KeyCode::Char('?')));
+        assert_eq!(app.mode, Mode::Help);
+
+        // Any key dismisses it — and is swallowed, not executed: `x` here
+        // must not open a stop-confirm dialog.
+        handle_key(&mut app, key(KeyCode::Char('x')));
+        assert_eq!(app.mode, Mode::Normal, "any key should close help");
     }
 
     #[test]

@@ -42,6 +42,8 @@ pub enum Mode {
     ProfilePicker,
     Filter,
     Confirm(ConfirmAction),
+    /// The full key list; the one-line menu only has room for the essentials.
+    Help,
 }
 
 #[derive(Debug, Clone, PartialEq)]

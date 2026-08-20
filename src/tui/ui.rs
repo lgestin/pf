@@ -54,7 +54,7 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
     match &mode {
         Mode::Logs => render_log_panel(f, app, chunks[1]),
         Mode::NewForward => render_new_forward_form(f, app, chunks[1]),
-        Mode::Normal | Mode::Filter | Mode::ProfilePicker | Mode::Confirm(_) => {}
+        Mode::Normal | Mode::Filter | Mode::ProfilePicker | Mode::Confirm(_) | Mode::Help => {}
     }
 
     render_status_bar(f, app, chunks[2]);
@@ -63,6 +63,72 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
         render_profile_picker(f, app);
     } else if let Mode::Confirm(action) = &mode {
         render_confirm_dialog(f, action);
+    } else if matches!(mode, Mode::Help) {
+        render_help_overlay(f);
+    }
+}
+
+/// Every binding, in one place — the one-line menu only carries the
+/// essentials, and this overlay is where the rest are discoverable.
+fn render_help_overlay(f: &mut Frame) {
+    let pairs: &[(&str, &str)] = &[
+        ("j/k ↑/↓", "move"),
+        ("↵/space", "fold"),
+        ("g/G", "first/last"),
+        ("←/→", "collapse/expand"),
+        ("ctrl-d/u", "half page"),
+        ("Z", "collapse all"),
+        ("PgUp/PgDn", "page"),
+        ("m", "machine list"),
+        ("a", "add forward"),
+        ("A", "connect new machine"),
+        ("x", "stop"),
+        ("r", "restart"),
+        ("l", "logs"),
+        ("s", "start profile"),
+        ("o", "open URL"),
+        ("y", "copy URL"),
+        ("/", "filter · ↑/↓ browse"),
+        ("esc", "clear filter"),
+    ];
+
+    let key_style = Style::default().fg(ACCENT).add_modifier(Modifier::BOLD);
+    let lines: Vec<Line> = pairs
+        .chunks(2)
+        .map(|row| {
+            let mut spans = Vec::new();
+            for (k, what) in row {
+                spans.push(Span::styled(format!("  {k:>10}  "), key_style));
+                spans.push(Span::raw(format!("{what:<22}")));
+            }
+            Line::from(spans)
+        })
+        .collect();
+
+    let height = lines.len() as u16 + 2;
+    let width = 76.min(f.area().width);
+    let area = centered_fixed(width, height, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Keys ")
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded),
+        ),
+        area,
+    );
+}
+
+/// A centered rect of fixed size, clamped to the frame.
+fn centered_fixed(width: u16, height: u16, area: Rect) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
     }
 }
 
@@ -587,17 +653,15 @@ fn keys(pairs: &[(&'static str, &'static str)]) -> Vec<Span<'static>> {
 
 fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
     let hint = match &app.mode {
+        // The essentials only; ? holds the rest.
         Mode::Normal => keys(&[
             ("j/k", "move"),
             ("↵", "fold"),
             ("a", "add"),
-            ("A", "new host"),
             ("x", "stop"),
-            ("r", "restart"),
             ("l", "logs"),
             ("/", "filter"),
-            ("m", "list"),
-            ("s", "profile"),
+            ("?", "help"),
             ("q", "quit"),
         ]),
         Mode::Logs => keys(&[
@@ -610,6 +674,7 @@ fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
         Mode::ProfilePicker => keys(&[("j/k", "move"), ("↵", "start"), ("esc", "cancel")]),
         Mode::Filter => keys(&[("↑/↓", "move"), ("↵", "apply"), ("esc", "clear")]),
         Mode::Confirm(_) => keys(&[("y", "confirm"), ("n", "cancel")]),
+        Mode::Help => keys(&[("any key", "close")]),
     };
 
     let mut spans = vec![Span::raw(" ")];
@@ -800,6 +865,29 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn the_help_overlay_lists_the_keys_the_menu_has_no_room_for() {
+        let mut app = app_with(vec![], &["nas"]);
+        app.mode = Mode::Help;
+
+        let text = draw(&mut app, 100, 30);
+        // The long tail that never fit the one-line menu.
+        assert!(text.contains("collapse all"), "Z missing from help:\n{text}");
+        assert!(text.contains("open URL"), "o missing from help:\n{text}");
+        assert!(text.contains("copy URL"), "y missing from help:\n{text}");
+        assert!(text.contains("half page"), "ctrl-d/u missing from help:\n{text}");
+    }
+
+    #[test]
+    fn the_menu_advertises_help_instead_of_overflowing() {
+        let mut app = app_with(vec![], &["nas"]);
+        let text = draw(&mut app, 110, 10);
+
+        assert!(text.contains("? help"), "no way to discover the help overlay:\n{text}");
+        // The long tail lives in help now; the bar stays scannable.
+        assert!(!text.contains("restart"), "menu still overflowing:\n{text}");
     }
 
     #[test]
@@ -1030,6 +1118,24 @@ mod tests {
         app.select(2);
 
         let mut terminal = Terminal::new(TestBackend::new(76, 11)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        println!();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            println!("{}", line.trim_end());
+        }
+        println!();
+    }
+
+    /// `cargo test preview_help -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn preview_help() {
+        let mut app = app_with(vec![], &["bastion", "nas"]);
+        app.mode = Mode::Help;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer();
         println!();
