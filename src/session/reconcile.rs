@@ -233,7 +233,7 @@ mod tests {
         assert!(matches!(&actions[0], Action::Cancel(_)));
     }
 
-    use crate::session::ssh::{FakeSsh, SshControl};
+    use crate::session::ssh::FakeSsh;
 
     #[test]
     fn applying_an_attach_records_it_as_attached() {
