@@ -13,14 +13,49 @@ use std::io;
 use std::time::{Duration, Instant};
 use tree::Sel;
 
-pub fn run() -> Result<()> {
-    // Setup terminal
-    terminal::enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+/// Puts the terminal back the way we found it, however the TUI ends: clean
+/// exit, `?` bubbling out of the event loop, or a panic anywhere. Without
+/// this, any of those left the shell raw inside the alternate screen.
+struct TerminalGuard;
 
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        terminal::enable_raw_mode()?;
+        crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
+        Ok(Self)
+    }
+
+    /// Idempotent and error-swallowing: it may run from the panic hook, from
+    /// Drop during unwind, or after a clean exit — possibly several of those
+    /// in sequence, possibly with no tty at all.
+    fn restore() {
+        let _ = terminal::disable_raw_mode();
+        let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        Self::restore();
+    }
+}
+
+pub fn run() -> Result<()> {
+    // Restore before the default hook prints, so the panic message lands on
+    // the shell rather than vanishing with the alternate screen.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        TerminalGuard::restore();
+        default_hook(info);
+    }));
+
+    let _guard = TerminalGuard::enter()?;
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+    event_loop(&mut terminal)
+}
+
+fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     let mut app = AppState::new();
     app.refresh_profiles();
     app.refresh();
@@ -71,11 +106,7 @@ pub fn run() -> Result<()> {
         }
     }
 
-    // Restore terminal
-    terminal::disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
+    // The guard in run() restores the terminal.
     Ok(())
 }
 
@@ -534,6 +565,15 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(app.pending_actions, 0, "action never reported back");
+    }
+
+    #[test]
+    fn terminal_restore_is_safe_to_call_anytime() {
+        // Runs from the panic hook, from Drop during unwind, and after a
+        // clean exit — possibly several of those in sequence, possibly with
+        // no tty at all. It must swallow errors, not add a second panic.
+        TerminalGuard::restore();
+        TerminalGuard::restore();
     }
 
     #[test]
