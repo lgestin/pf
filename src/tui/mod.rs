@@ -557,6 +557,39 @@ mod tests {
         app
     }
 
+    #[test]
+    fn a_fold_survives_the_next_tick_while_the_machine_stays_live() {
+        let mut app = app_on_a_forward();
+        // First tick: gpu-01 has just come up and may open itself.
+        app.auto_expand_new_sessions();
+
+        // The user folds it with ←.
+        app.select(0);
+        handle_key(&mut app, key(KeyCode::Left));
+        assert!(!app.expanded.contains("gpu-01"), "the fold itself failed");
+
+        // Next tick: gpu-01 is still live, but it is not NEW — the fold
+        // must hold rather than reopen a second after the user closed it.
+        app.auto_expand_new_sessions();
+        assert!(
+            !app.expanded.contains("gpu-01"),
+            "the tick refresh reopened a fold the user just closed"
+        );
+    }
+
+    #[test]
+    fn a_machine_that_comes_up_still_opens_itself() {
+        let mut app = app_on_a_forward();
+        app.expanded.clear();
+
+        // gpu-01 was not live at any earlier tick, so it announces itself.
+        app.auto_expand_new_sessions();
+        assert!(
+            app.expanded.contains("gpu-01"),
+            "a newly-live machine should unfold to show its forwards"
+        );
+    }
+
     /// Poll until the background action lands, or a deadline passes.
     fn wait_for_actions(app: &mut AppState) {
         let deadline = Instant::now() + Duration::from_secs(5);

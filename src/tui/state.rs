@@ -96,6 +96,9 @@ pub struct AppState {
     pub tree_visible: usize,
     /// True until the first refresh, which seeds the fold state.
     first_refresh: bool,
+    /// Hosts that were live at the last refresh, so only a machine that has
+    /// *newly* come up may unfold itself — never one the user just folded.
+    live_hosts: HashSet<String>,
 
     pub profiles: Vec<(String, crate::config::Profile)>,
     pub profile_state: ListState,
@@ -161,6 +164,7 @@ impl AppState {
             filter: String::new(),
             tree_visible: 20,
             first_refresh: true,
+            live_hosts: HashSet::new(),
             profiles: Vec::new(),
             profile_state: ListState::default().with_selected(Some(0)),
             should_quit: false,
@@ -377,17 +381,33 @@ impl AppState {
         if self.first_refresh {
             self.expanded = tree::default_expanded(&self.machines);
             self.first_refresh = false;
-        } else {
-            // A machine that has come up since the last refresh opens itself,
-            // so starting a forward shows it rather than hiding it in a fold.
-            for machine in &self.machines {
-                if machine.is_live() && !machine.forwards.is_empty() {
-                    self.expanded.insert(machine.host.clone());
-                }
-            }
         }
+        // Runs on the first refresh too, so the live set is seeded and a fold
+        // made within the first second holds like any other.
+        self.auto_expand_new_sessions();
 
         self.rebuild_rows();
+    }
+
+    /// A machine that has come up since the last refresh opens itself, so
+    /// starting a forward shows it rather than hiding it in a fold. Only
+    /// *newly* live machines qualify — re-expanding every live machine on
+    /// every tick undid folds a second after the user made them.
+    pub fn auto_expand_new_sessions(&mut self) {
+        for machine in &self.machines {
+            if machine.is_live()
+                && !machine.forwards.is_empty()
+                && !self.live_hosts.contains(&machine.host)
+            {
+                self.expanded.insert(machine.host.clone());
+            }
+        }
+        self.live_hosts = self
+            .machines
+            .iter()
+            .filter(|m| m.is_live())
+            .map(|m| m.host.clone())
+            .collect();
     }
 
     pub fn refresh_profiles(&mut self) {
