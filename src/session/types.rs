@@ -54,14 +54,14 @@ pub enum SessionStatus {
     Failed,
 }
 
-/// Whether a forward is currently attached to the live master.
+/// Whether a forward is currently established on the live master.
 ///
 /// Deliberately separate from `state::ForwardStatus`, which is frozen as the
 /// `pf list --json` contract and `display.rs`'s color map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AttachStatus {
-    Attached,
+    Forwarded,
     Pending,
     Failed,
 }

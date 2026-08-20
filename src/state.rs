@@ -68,7 +68,7 @@ pub fn project(session: &SessionState) -> Vec<ForwardState> {
             status: match (session.status, f.status) {
                 (SessionStatus::Failed, _) => ForwardStatus::Failed,
                 (_, AttachStatus::Failed) => ForwardStatus::Failed,
-                (SessionStatus::Connected, AttachStatus::Attached) => ForwardStatus::Running,
+                (SessionStatus::Connected, AttachStatus::Forwarded) => ForwardStatus::Running,
                 _ => ForwardStatus::Reconnecting,
             },
             started_at: session.started_at,
@@ -131,7 +131,7 @@ mod tests {
     fn a_connected_attached_forward_projects_as_running() {
         let s = session(
             SessionStatus::Connected,
-            vec![obs("a", 1, AttachStatus::Attached)],
+            vec![obs("a", 1, AttachStatus::Forwarded)],
         );
         let flat = project(&s);
 
@@ -163,7 +163,7 @@ mod tests {
         let s = session(
             SessionStatus::Connected,
             vec![
-                obs("a", 1, AttachStatus::Attached),
+                obs("a", 1, AttachStatus::Forwarded),
                 obs("b", 2, AttachStatus::Failed),
             ],
         );
@@ -180,12 +180,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let mut one = session(
             SessionStatus::Connected,
-            vec![obs("zeta", 1, AttachStatus::Attached)],
+            vec![obs("zeta", 1, AttachStatus::Forwarded)],
         );
         one.host = "gpu-01".to_string();
         let mut two = session(
             SessionStatus::Connected,
-            vec![obs("alpha", 2, AttachStatus::Attached)],
+            vec![obs("alpha", 2, AttachStatus::Forwarded)],
         );
         two.host = "gpu-02".to_string();
 

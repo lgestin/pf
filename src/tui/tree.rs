@@ -225,7 +225,7 @@ mod tests {
             local_port: port,
             remote_host: "localhost".to_string(),
             remote_port: port,
-            status: AttachStatus::Attached,
+            status: AttachStatus::Forwarded,
             attached_at: None,
             error: None,
         }

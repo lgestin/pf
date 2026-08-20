@@ -29,7 +29,7 @@ pub fn reconcile(desired: &DesiredSession, observed: &[ForwardObs]) -> Vec<Actio
                 } else if have.status == AttachStatus::Pending {
                     actions.push(Action::Attach(want.clone()));
                 }
-                // Attached: nothing to do.
+                // Forwarded: nothing to do.
                 // Failed with an unchanged spec: deliberately left alone, so a
                 // permanently conflicting port cannot spin a retry hot loop.
             }
@@ -75,7 +75,7 @@ pub fn apply(
                             "attached {} -> {}:{}",
                             f.local_port, f.remote_host, f.remote_port
                         ));
-                        (AttachStatus::Attached, Some(Utc::now()), None)
+                        (AttachStatus::Forwarded, Some(Utc::now()), None)
                     }
                     Err(e) => {
                         logs.push(format!("attach of {} failed: {e}", f.local_port));
@@ -142,7 +142,7 @@ mod tests {
         observed(
             &names
                 .iter()
-                .map(|(n, p)| (*n, *p, AttachStatus::Attached))
+                .map(|(n, p)| (*n, *p, AttachStatus::Forwarded))
                 .collect::<Vec<_>>(),
         )
     }
@@ -247,7 +247,7 @@ mod tests {
 
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].name, "a");
-        assert_eq!(obs[0].status, AttachStatus::Attached);
+        assert_eq!(obs[0].status, AttachStatus::Forwarded);
         assert!(obs[0].attached_at.is_some());
         assert!(obs[0].error.is_none());
         assert_eq!(logs.len(), 1);
@@ -266,7 +266,7 @@ mod tests {
 
         let a = obs.iter().find(|f| f.name == "a").unwrap();
         let b = obs.iter().find(|f| f.name == "b").unwrap();
-        assert_eq!(a.status, AttachStatus::Attached, "healthy forward was affected");
+        assert_eq!(a.status, AttachStatus::Forwarded, "healthy forward was affected");
         assert_eq!(b.status, AttachStatus::Failed);
         assert!(b.error.as_ref().unwrap().contains("Address already in use"));
     }
@@ -320,6 +320,6 @@ mod tests {
         apply(&reconcile(&d, &obs), "gpu-01", &ssh, &mut obs);
 
         assert_eq!(obs.len(), 2);
-        assert!(obs.iter().all(|f| f.status == AttachStatus::Attached));
+        assert!(obs.iter().all(|f| f.status == AttachStatus::Forwarded));
     }
 }

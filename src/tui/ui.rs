@@ -7,10 +7,28 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Paragraph, Row as TRow,
-    Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Wrap,
+    Block, BorderType, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Paragraph,
+    Row as TRow, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, Wrap,
 };
 use ratatui::Frame;
+
+// Palette. Named ANSI colors rather than RGB, so the tree inherits whatever
+// theme the user's terminal already uses instead of fighting it.
+const ACCENT: Color = Color::Cyan;
+const OK: Color = Color::Green;
+const WARN: Color = Color::Yellow;
+const BAD: Color = Color::Red;
+const MUTE: Color = Color::DarkGray;
+
+fn mute() -> Style {
+    Style::default().fg(MUTE)
+}
+
+/// A status lamp: shape carries the state as well as color, so the tree still
+/// reads on a monochrome terminal or to a colorblind eye.
+fn lamp(symbol: &'static str, color: Color) -> Cell<'static> {
+    Cell::from(symbol).style(Style::default().fg(color))
+}
 
 pub fn render(f: &mut Frame, app: &mut AppState) {
     let chunks = Layout::default()
@@ -45,10 +63,13 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
 }
 
 /// Uptime for a machine row: how long the *current* master has held.
+///
+/// Blank rather than "-" when there is no session — most of an all-hosts list
+/// is idle, and a column of dashes is noise on the rows that should be quietest.
 fn session_uptime(machine: &MachineRow) -> String {
     match machine.session.as_ref().and_then(|s| s.connected_at) {
         Some(at) => format_since(at),
-        None => "-".to_string(),
+        None => String::new(),
     }
 }
 
@@ -56,7 +77,25 @@ fn format_since(at: DateTime<Utc>) -> String {
     format_duration((Utc::now() - at).num_seconds())
 }
 
+/// The effective state of a machine, folding a dead watcher into `Failed`.
+fn machine_state(machine: &MachineRow) -> Option<SessionStatus> {
+    let session = machine.session.as_ref()?;
+    if !process::is_alive(session.watcher_pid) {
+        return Some(SessionStatus::Failed);
+    }
+    Some(session.status)
+}
+
 fn machine_row(machine: &MachineRow, expanded: bool) -> TRow<'static> {
+    let state = machine_state(machine);
+
+    let (lamp_sym, lamp_color) = match state {
+        Some(SessionStatus::Connected) => ("●", OK),
+        Some(SessionStatus::Connecting) | Some(SessionStatus::Reconnecting) => ("◐", WARN),
+        Some(SessionStatus::Failed) => ("✕", BAD),
+        None => ("○", MUTE),
+    };
+
     let marker = if machine.forwards.is_empty() {
         " "
     } else if expanded {
@@ -65,99 +104,187 @@ fn machine_row(machine: &MachineRow, expanded: bool) -> TRow<'static> {
         "▸"
     };
 
-    // Forward count rides in column 0 so a collapsed machine still shows its
-    // uptime — folding must not cost information.
-    let count = if machine.forwards.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", machine.forwards.len())
-    };
-    let label = format!("{marker} {}{count}", machine.host);
-
-    let (status, color) = match machine.session.as_ref().map(|s| s.status) {
-        Some(SessionStatus::Connected) => ("connected", Color::Green),
-        Some(SessionStatus::Connecting) => ("connecting", Color::Yellow),
-        Some(SessionStatus::Reconnecting) => ("reconnecting", Color::Yellow),
-        Some(SessionStatus::Failed) => ("failed", Color::Red),
-        None => ("idle", Color::DarkGray),
+    // Live machines carry the eye; idle ones recede. In a healthy system
+    // nothing should shout, so only trouble gets full brightness.
+    let host_style = match state {
+        Some(SessionStatus::Connected) => Style::default().add_modifier(Modifier::BOLD),
+        Some(SessionStatus::Failed) => Style::default().fg(BAD).add_modifier(Modifier::BOLD),
+        Some(_) => Style::default(),
+        None => mute(),
     };
 
-    let alive = machine
-        .session
-        .as_ref()
-        .is_some_and(|s| process::is_alive(s.watcher_pid));
-    let (status, color) = if machine.session.is_some() && !alive {
-        ("failed", Color::Red)
-    } else {
-        (status, color)
+    let mut label = vec![
+        Span::styled(format!("{marker} "), mute()),
+        Span::styled(machine.host.clone(), host_style),
+    ];
+    // Folding must not cost information, so a collapsed machine still says how
+    // many forwards it holds. The middot keeps the number from reading as part
+    // of the hostname.
+    if !machine.forwards.is_empty() {
+        label.push(Span::styled(
+            format!(" ·{}", machine.forwards.len()),
+            mute(),
+        ));
+    }
+
+    let (status_text, status_style) = match state {
+        Some(SessionStatus::Connected) => ("connected", mute()),
+        Some(SessionStatus::Connecting) => ("connecting", Style::default().fg(WARN)),
+        Some(SessionStatus::Reconnecting) => ("reconnecting", Style::default().fg(WARN)),
+        Some(SessionStatus::Failed) => ("failed", Style::default().fg(BAD)),
+        None => ("", mute()),
     };
 
+    // A reconnect count of zero is the normal case and says nothing. Render it
+    // only once it becomes a signal.
     let reconnects = match machine.session.as_ref() {
-        Some(s) if s.reconnect_count > 0 => format!("↻{}", s.reconnect_count),
-        Some(_) => "↻0".to_string(),
-        None => "-".to_string(),
+        Some(s) if s.reconnect_count > 0 => Span::styled(
+            format!("↻{}", s.reconnect_count),
+            Style::default().fg(WARN),
+        ),
+        _ => Span::raw(""),
     };
 
     TRow::new(vec![
-        Cell::from(label).style(Style::default().add_modifier(Modifier::BOLD)),
-        Cell::from(status).style(Style::default().fg(color)),
-        Cell::from(session_uptime(machine)),
-        Cell::from(reconnects).style(Style::default().fg(Color::DarkGray)),
+        lamp(lamp_sym, lamp_color),
+        Cell::from(Line::from(label)),
+        Cell::from(Span::styled(status_text, status_style)),
+        Cell::from(Span::styled(session_uptime(machine), mute())),
+        Cell::from(reconnects),
     ])
 }
 
 fn forward_row(machine: &MachineRow, fi: usize) -> TRow<'static> {
     let f = &machine.forwards[fi];
-    let label = format!("    {} → {}:{}", f.local_port, f.remote_host, f.remote_port);
+    let last = fi + 1 == machine.forwards.len();
 
-    let (status, color) = match f.status {
-        AttachStatus::Attached => ("attached", Color::Green),
-        AttachStatus::Pending => ("pending", Color::Yellow),
-        AttachStatus::Failed => ("failed", Color::Red),
+    let (lamp_sym, lamp_color) = match f.status {
+        AttachStatus::Forwarded => ("●", OK),
+        AttachStatus::Pending => ("◐", WARN),
+        AttachStatus::Failed => ("✕", BAD),
     };
 
-    let uptime = match f.attached_at {
-        Some(at) => format_since(at),
-        None => "-".to_string(),
-    };
+    // Guides make the parent-child relation visible rather than implied by
+    // whitespace, which matters once several machines are expanded at once.
+    let guide = if last { "  └─ " } else { "  ├─ " };
 
-    // A failed attach has an error worth surfacing; it replaces the uptime,
-    // which would be "-" anyway.
-    let detail = if f.status == AttachStatus::Failed {
-        f.error
-            .as_deref()
-            .map(short_error)
-            .unwrap_or_else(|| uptime.clone())
+    let port_style = if f.status == AttachStatus::Failed {
+        Style::default().fg(BAD)
     } else {
-        uptime
+        Style::default()
+    };
+
+    let label = vec![
+        Span::styled(guide, mute()),
+        Span::styled(f.local_port.to_string(), port_style),
+        Span::styled(" → ", mute()),
+        Span::styled(
+            format!("{}:{}", f.remote_host, f.remote_port),
+            Style::default().fg(MUTE),
+        ),
+    ];
+
+    let (status_text, status_style) = match f.status {
+        AttachStatus::Forwarded => ("forwarded", mute()),
+        AttachStatus::Pending => ("pending", Style::default().fg(WARN)),
+        AttachStatus::Failed => ("failed", Style::default().fg(BAD)),
+    };
+
+    // A failed forward has an error worth reading; it takes the uptime slot,
+    // which would only have shown "-" anyway.
+    let detail = if f.status == AttachStatus::Failed {
+        match f.error.as_deref() {
+            Some(e) => Span::styled(short_error(e), Style::default().fg(BAD)),
+            None => Span::styled("-", mute()),
+        }
+    } else {
+        let uptime = match f.attached_at {
+            Some(at) => format_since(at),
+            None => "-".to_string(),
+        };
+        Span::styled(uptime, mute())
     };
 
     TRow::new(vec![
-        Cell::from(label).style(Style::default().fg(Color::Gray)),
-        Cell::from(status).style(Style::default().fg(color)),
+        lamp(lamp_sym, lamp_color),
+        Cell::from(Line::from(label)),
+        Cell::from(Span::styled(status_text, status_style)),
         Cell::from(detail),
         Cell::from(""),
     ])
 }
 
-/// ssh's stderr can be several lines; the table has one narrow cell.
+/// Compress ssh's stderr into something that fits a table cell and still says
+/// what went wrong.
+///
+/// ssh reports the likes of `bind [127.0.0.1]:5432: Address already in use`,
+/// whose front half is all mechanism. The reason lives after the last colon,
+/// and the handful of reasons worth recognising get a plainer phrasing. The
+/// full text is always in the session log.
 fn short_error(err: &str) -> String {
     let first = err.lines().next().unwrap_or(err).trim();
-    if first.len() > 24 {
-        format!("{}…", &first[..23])
-    } else {
-        first.to_string()
+    let reason = first.rsplit(": ").next().unwrap_or(first).trim();
+
+    let lower = reason.to_lowercase();
+    if lower.contains("address already in use") {
+        return "port in use".to_string();
     }
+    if lower.contains("permission denied") {
+        return "denied".to_string();
+    }
+    if lower.contains("cannot assign") {
+        return "bad address".to_string();
+    }
+
+    let compact = reason.to_lowercase();
+    if compact.chars().count() > 12 {
+        format!("{}…", compact.chars().take(11).collect::<String>())
+    } else {
+        compact
+    }
+}
+
+/// ` pf ─ 2 of 12 connected ` — the one number worth reading from across a room.
+fn tree_title(app: &AppState) -> Line<'static> {
+    let connected = app
+        .machines
+        .iter()
+        .filter(|m| machine_state(m) == Some(SessionStatus::Connected))
+        .count();
+    let total = app.machines.len();
+
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled("pf", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled("  ", mute()),
+    ];
+
+    if app.filter.is_empty() {
+        spans.push(Span::styled(
+            format!("{connected} of {total} connected"),
+            Style::default(),
+        ));
+        spans.push(Span::styled(
+            format!("  ·  {} ", app.machine_source.label()),
+            mute(),
+        ));
+    } else {
+        spans.push(Span::styled(format!("/{}", app.filter), Style::default().fg(ACCENT)));
+        spans.push(Span::styled(format!("  ·  {total} shown "), mute()));
+    }
+
+    Line::from(spans)
 }
 
 fn render_tree(f: &mut Frame, app: &mut AppState, area: Rect) {
     let header = TRow::new(vec![
-        Cell::from("Machine / Forward"),
-        Cell::from("Status"),
-        Cell::from("Uptime"),
-        Cell::from("Reconn"),
+        Cell::from(""),
+        Cell::from("machine"),
+        Cell::from("state"),
+        Cell::from("uptime"),
+        Cell::from(""),
     ])
-    .style(Style::default().add_modifier(Modifier::BOLD));
+    .style(mute());
 
     let rows: Vec<TRow> = app
         .rows
@@ -174,44 +301,94 @@ fn render_tree(f: &mut Frame, app: &mut AppState, area: Rect) {
         })
         .collect();
 
-    let title = if app.filter.is_empty() {
-        format!(" Machines ({}) ", app.machine_source.label())
-    } else {
-        format!(" Machines — filter: {} ", app.filter)
-    };
+    let block = Block::default()
+        .title(tree_title(app))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(mute());
+
+    if rows.is_empty() {
+        render_empty_state(f, app, block, area);
+        return;
+    }
 
     let table = Table::new(
         rows,
         [
+            Constraint::Length(1),
             Constraint::Fill(1),
             Constraint::Length(12),
-            Constraint::Length(10),
-            Constraint::Length(7),
+            Constraint::Length(12),
+            Constraint::Length(4),
         ],
     )
     .header(header)
-    .row_highlight_style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("› ")
+    .column_spacing(1)
+    .row_highlight_style(Style::default().bg(Color::Indexed(236)))
+    // A solid rail reads as a cursor; a chevron reads as a bullet and fights
+    // the tree guides.
+    .highlight_symbol(Span::styled("▌", Style::default().fg(ACCENT)))
     .highlight_spacing(HighlightSpacing::Always)
-    .block(Block::default().title(title).borders(Borders::ALL));
+    .block(block);
 
     f.render_stateful_widget(table, area, &mut app.table_state);
 
     let visible = area.height.saturating_sub(3) as usize;
     if app.rows.len() > visible {
         let mut sb = ScrollbarState::new(app.rows.len()).position(app.table_state.offset());
+        // Inset vertically so the track cannot paint over the block's corners.
+        let track = area.inner(ratatui::layout::Margin {
+            horizontal: 0,
+            vertical: 1,
+        });
         f.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
-                .end_symbol(None),
-            area,
+                .end_symbol(None)
+                .track_symbol(None)
+                .thumb_style(Style::default().fg(ACCENT)),
+            track,
             &mut sb,
         );
     }
+}
+
+/// An empty screen is an invitation to act, so say what to press.
+fn render_empty_state(f: &mut Frame, app: &AppState, block: Block<'static>, area: Rect) {
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = if !app.filter.is_empty() {
+        vec![
+            Line::from(Span::styled(
+                format!("No machine matches “{}”", app.filter),
+                Style::default(),
+            )),
+            Line::from(Span::styled("Esc clears the filter", mute())),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled("No machines to show", Style::default())),
+            Line::from(Span::styled(
+                "Add hosts to ~/.ssh/config, or press m to widen the list",
+                mute(),
+            )),
+        ]
+    };
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Length(lines.len() as u16),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    f.render_widget(
+        Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+        vertical[1],
+    );
 }
 
 fn render_log_panel(f: &mut Frame, app: &AppState, area: Rect) {
@@ -343,31 +520,62 @@ fn render_confirm_dialog(f: &mut Frame, action: &ConfirmAction) {
     f.render_widget(para, area);
 }
 
+/// Keys carry the accent, their descriptions recede — the eye should find the
+/// key it wants without reading the whole line.
+fn keys(pairs: &[(&'static str, &'static str)]) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, (key, what)) in pairs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", mute()));
+        }
+        spans.push(Span::styled(*key, Style::default().fg(ACCENT)));
+        spans.push(Span::styled(format!(" {what}"), mute()));
+    }
+    spans
+}
+
 fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
     let hint = match &app.mode {
-        Mode::Normal => {
-            "j/k:nav  ↵:fold  a:add  x:stop  r:restart  l:logs  /:filter  m:mode  s:profile  q:quit"
-        }
-        Mode::Logs => "j/k:scroll  Esc:back  q:quit",
-        Mode::NewForward => "Tab:next  Enter:next/submit  Esc:cancel",
-        Mode::ProfilePicker => "j/k:nav  Enter:start  Esc:cancel",
-        Mode::Filter => "type to filter  Enter:apply  Esc:clear",
-        Mode::Confirm(_) => "y:confirm  n/Esc:cancel",
+        Mode::Normal => keys(&[
+            ("j/k", "move"),
+            ("↵", "fold"),
+            ("a", "add"),
+            ("x", "stop"),
+            ("r", "restart"),
+            ("l", "logs"),
+            ("/", "filter"),
+            ("m", "list"),
+            ("s", "profile"),
+            ("q", "quit"),
+        ]),
+        Mode::Logs => keys(&[("j/k", "scroll"), ("esc", "back"), ("q", "quit")]),
+        Mode::NewForward => keys(&[("tab", "field"), ("↵", "next"), ("esc", "cancel")]),
+        Mode::ProfilePicker => keys(&[("j/k", "move"), ("↵", "start"), ("esc", "cancel")]),
+        Mode::Filter => keys(&[("↵", "apply"), ("esc", "clear")]),
+        Mode::Confirm(_) => keys(&[("y", "confirm"), ("n", "cancel")]),
     };
 
-    let text = if app.mode == Mode::Filter {
-        format!("/{}_  |  {hint}", app.filter)
+    let mut spans = vec![Span::raw(" ")];
+
+    if app.mode == Mode::Filter {
+        spans.push(Span::styled(
+            format!("/{}_", app.filter),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled("  ", mute()));
     } else if let Some(msg) = &app.status_message {
-        format!("{msg}  |  {hint}")
-    } else {
-        hint.to_string()
-    };
+        // Failures deserve the eye; confirmations do not.
+        let style = if msg.starts_with("Failed") || msg.contains("must be") {
+            Style::default().fg(BAD)
+        } else {
+            Style::default().fg(OK)
+        };
+        spans.push(Span::styled(msg.clone(), style));
+        spans.push(Span::styled("  ", mute()));
+    }
 
-    let bar = Paragraph::new(Line::from(Span::styled(
-        text,
-        Style::default().fg(Color::Cyan),
-    )));
-    f.render_widget(bar, area);
+    spans.extend(hint);
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -468,23 +676,25 @@ mod tests {
     #[test]
     fn an_expanded_machine_shows_its_forwards_indented() {
         let mut app = app_with(
-            vec![live("gpu-01", vec![obs("jupyter", 8888, AttachStatus::Attached)])],
+            vec![live("gpu-01", vec![obs("jupyter", 8888, AttachStatus::Forwarded)])],
             &[],
         );
         let text = draw(&mut app, 90, 12);
 
         assert!(text.contains("gpu-01"), "machine row missing:\n{text}");
         assert!(text.contains("▾"), "expanded marker missing:\n{text}");
-        assert!(text.contains("(1)"), "forward count missing:\n{text}");
+        assert!(text.contains("·1"), "forward count missing:\n{text}");
         assert!(text.contains("8888 → localhost:8888"), "forward row missing:\n{text}");
         assert!(text.contains("connected"), "session status missing:\n{text}");
-        assert!(text.contains("attached"), "attach status missing:\n{text}");
+        assert!(text.contains("forwarded"), "forward status missing:\n{text}");
+        assert!(text.contains("●"), "status lamp missing:\n{text}");
+        assert!(text.contains("└─"), "tree guide missing:\n{text}");
     }
 
     #[test]
     fn a_collapsed_machine_hides_forwards_but_keeps_its_own_row() {
         let mut app = app_with(
-            vec![live("gpu-01", vec![obs("jupyter", 8888, AttachStatus::Attached)])],
+            vec![live("gpu-01", vec![obs("jupyter", 8888, AttachStatus::Forwarded)])],
             &[],
         );
         app.expanded.clear();
@@ -495,15 +705,67 @@ mod tests {
         assert!(text.contains("▸"), "collapsed marker missing:\n{text}");
         assert!(!text.contains("8888 → localhost"), "forward leaked while collapsed:\n{text}");
         // Folding must not cost information: the count still shows.
-        assert!(text.contains("(1)"), "forward count lost when collapsed:\n{text}");
+        assert!(text.contains("·1"), "forward count lost when collapsed:\n{text}");
     }
 
     #[test]
-    fn idle_hosts_render_without_a_session() {
+    fn idle_hosts_render_with_a_hollow_lamp_and_no_status_word() {
         let mut app = app_with(vec![], &["nas", "bastion"]);
         let text = draw(&mut app, 90, 12);
+
         assert!(text.contains("nas"), "idle host missing:\n{text}");
-        assert!(text.contains("idle"), "idle status missing:\n{text}");
+        assert!(text.contains("○"), "hollow lamp missing:\n{text}");
+        // With most of a 12-host list idle, repeating "idle" on every row is
+        // noise — the hollow lamp and the dimmed name carry it.
+        assert!(!text.contains("idle"), "idle rows should stay quiet:\n{text}");
+    }
+
+    #[test]
+    fn a_healthy_machine_does_not_display_a_zero_reconnect_count() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &[]);
+        let text = draw(&mut app, 90, 12);
+        assert!(!text.contains("↻"), "zero reconnects should stay silent:\n{text}");
+    }
+
+    #[test]
+    fn a_reconnect_count_appears_once_it_is_a_signal() {
+        let mut s = live("gpu-01", vec![]);
+        s.reconnect_count = 3;
+        let mut app = app_with(vec![s], &[]);
+        let text = draw(&mut app, 90, 12);
+        assert!(text.contains("↻3"), "reconnect count missing:\n{text}");
+    }
+
+    #[test]
+    fn the_title_counts_connected_machines() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &["nas", "bastion"]);
+        let text = draw(&mut app, 90, 12);
+        assert!(text.contains("1 of 3 connected"), "title count missing:\n{text}");
+    }
+
+    #[test]
+    fn ssh_errors_compress_to_something_that_fits_a_cell() {
+        // The front half of ssh's message is all mechanism; the reason is what
+        // the cell has room for.
+        assert_eq!(
+            short_error("bind [127.0.0.1]:5432: Address already in use"),
+            "port in use"
+        );
+        assert_eq!(
+            short_error("channel_setup_fwd_listener: Permission denied"),
+            "denied"
+        );
+        assert_eq!(short_error("Cannot assign requested address"), "bad address");
+
+        // Anything unrecognised still has to fit.
+        let long = short_error("some entirely unexpected failure mode from ssh");
+        assert!(long.chars().count() <= 13, "did not fit the cell: {long:?}");
+
+        // Multi-line stderr collapses to its first line.
+        assert_eq!(
+            short_error("bind: Address already in use\nmore detail follows"),
+            "port in use"
+        );
     }
 
     #[test]
@@ -515,7 +777,10 @@ mod tests {
         let mut app = app_with(vec![live("gpu-01", vec![f])], &[]);
         let text = draw(&mut app, 100, 12);
         assert!(text.contains("failed"), "failed status missing:\n{text}");
-        assert!(text.contains("bind"), "error text missing:\n{text}");
+        assert!(text.contains("✕"), "failure lamp missing:\n{text}");
+        // The reason, not ssh's `bind [127.0.0.1]:6006:` preamble.
+        assert!(text.contains("port in use"), "reason missing:\n{text}");
+        assert!(!text.contains("127.0.0.1"), "raw ssh mechanism leaked:\n{text}");
     }
 
     #[test]
@@ -536,7 +801,19 @@ mod tests {
         let mut app = app_with(vec![live("gpu-01", vec![])], &[]);
         app.filter = "gpu".to_string();
         let text = draw(&mut app, 90, 12);
-        assert!(text.contains("filter: gpu"), "filter not shown:\n{text}");
+        assert!(text.contains("/gpu"), "filter not shown:\n{text}");
+    }
+
+    #[test]
+    fn a_filter_matching_nothing_says_so_and_says_how_to_undo_it() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &[]);
+        app.filter = "zzzz".to_string();
+        app.machines.clear();
+        app.rows.clear();
+
+        let text = draw(&mut app, 90, 12);
+        assert!(text.contains("No machine matches"), "empty state missing:\n{text}");
+        assert!(text.contains("Esc"), "empty state gives no way out:\n{text}");
     }
 
     /// Not an assertion — prints the layout so it can be eyeballed.
@@ -547,8 +824,8 @@ mod tests {
         let mut gpu1 = live(
             "gpu-01",
             vec![
-                obs("jupyter", 8888, AttachStatus::Attached),
-                obs("tensorboard", 6006, AttachStatus::Attached),
+                obs("jupyter", 8888, AttachStatus::Forwarded),
+                obs("tensorboard", 6006, AttachStatus::Forwarded),
             ],
         );
         gpu1.reconnect_count = 1;
@@ -556,10 +833,17 @@ mod tests {
         let mut boom = obs("db", 5432, AttachStatus::Failed);
         boom.attached_at = None;
         boom.error = Some("bind [127.0.0.1]:5432: Address already in use".to_string());
-        let gpu2 = live("gpu-02", vec![obs("api", 3000, AttachStatus::Attached), boom]);
+        let gpu2 = live("gpu-02", vec![obs("api", 3000, AttachStatus::Forwarded), boom]);
 
-        let mut app = app_with(vec![gpu1, gpu2], &["bastion", "nas", "dev-box"]);
-        app.expanded.remove("gpu-02");
+        let mut reconnecting = live("turing", vec![obs("web", 8080, AttachStatus::Pending)]);
+        reconnecting.status = SessionStatus::Reconnecting;
+        reconnecting.connected_at = None;
+        reconnecting.reconnect_count = 4;
+
+        let mut app = app_with(
+            vec![gpu1, gpu2, reconnecting],
+            &["bastion", "nas", "dev-box"],
+        );
         app.rows = tree::flatten(&app.machines, &app.expanded);
         app.select(1);
 

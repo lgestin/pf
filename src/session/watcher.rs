@@ -341,7 +341,7 @@ mod tests {
                 local_port: 1,
                 remote_host: "localhost".to_string(),
                 remote_port: 1,
-                status: AttachStatus::Attached,
+                status: AttachStatus::Forwarded,
                 attached_at: Some(chrono::Utc::now()),
                 error: None,
             },
