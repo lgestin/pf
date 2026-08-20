@@ -84,7 +84,7 @@ pub struct SessionState {
     pub forwards: Vec<ForwardObs>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForwardObs {
     pub name: String,
     pub local_port: u16,
