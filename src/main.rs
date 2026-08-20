@@ -51,10 +51,10 @@ fn run(cli: Cli) -> Result<()> {
             },
         ),
 
-        Command::Stop { name, all } => cmd_stop(name, all),
+        Command::Stop { name, all, host } => cmd_stop(name, all, host),
         Command::List { json } => cmd_list(json),
         Command::Restart { name, all } => cmd_restart(name, all),
-        Command::Logs { name, follow } => cmd_logs(&name, follow),
+        Command::Logs { name, follow, host } => cmd_logs(name, follow, host),
 
         Command::Config { action } => match action {
             ConfigAction::Add { name, host, ports } => cmd_config_add(name, host, ports),
@@ -110,12 +110,12 @@ fn cmd_start(
         let remote_host = profile.remote_host.clone();
         let fwd_name = name_or_host;
 
-        watcher::spawn_watcher(
-            &fwd_name,
+        process::start_forward(
             &host,
+            &fwd_name,
             local_port,
-            remote_port,
             &remote_host,
+            remote_port,
             reconnect,
             policy,
         )?;
@@ -135,12 +135,12 @@ fn cmd_start(
 
         let fwd_name = name.unwrap_or_else(|| format!("{}-{}", name_or_host, local_port));
 
-        watcher::spawn_watcher(
-            &fwd_name,
+        process::start_forward(
             &name_or_host,
+            &fwd_name,
             local_port,
-            remote_port,
             "localhost",
+            remote_port,
             reconnect,
             policy,
         )?;
@@ -150,7 +150,13 @@ fn cmd_start(
     }
 }
 
-fn cmd_stop(name: Option<String>, all: bool) -> Result<()> {
+fn cmd_stop(name: Option<String>, all: bool, host: Option<String>) -> Result<()> {
+    if let Some(host) = host {
+        process::stop_host(&host)?;
+        println!("{} all forwards on '{}'", "[stopped]".yellow(), host);
+        return Ok(());
+    }
+
     if all {
         let states = ForwardState::list_all()?;
         if states.is_empty() {
@@ -166,7 +172,8 @@ fn cmd_stop(name: Option<String>, all: bool) -> Result<()> {
         return Ok(());
     }
 
-    let name = name.ok_or_else(|| PfError::Other("Name required (or use --all)".into()))?;
+    let name =
+        name.ok_or_else(|| PfError::Other("Name required (or use --all / --host)".into()))?;
     process::stop_forward(&name)?;
     display::print_stopped(&name);
     Ok(())
@@ -203,12 +210,12 @@ fn restart_one(name: &str) -> Result<()> {
     let state = ForwardState::load(name)?;
     process::stop_forward(name)?;
     std::thread::sleep(std::time::Duration::from_millis(500));
-    watcher::spawn_watcher(
-        &state.name,
+    process::start_forward(
         &state.host,
+        &state.name,
         state.local_port,
-        state.remote_port,
         &state.remote_host,
+        state.remote_port,
         state.auto_reconnect,
         watcher::RetryPolicy {
             max_retries: state.max_retries,
@@ -220,10 +227,20 @@ fn restart_one(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_logs(name: &str, follow: bool) -> Result<()> {
-    let log_path = paths::log_file(name)?;
+fn cmd_logs(name: Option<String>, follow: bool, host: Option<String>) -> Result<()> {
+    let host = match (name, host) {
+        (_, Some(h)) => h,
+        (Some(n), None) => {
+            process::find_host_for_forward(&n)?.ok_or_else(|| PfError::NotFound(n))?
+        }
+        (None, None) => {
+            return Err(PfError::Other("Name required (or use --host)".into()));
+        }
+    };
+
+    let log_path = paths::session_log_file(&paths::sanitize_host(&host))?;
     if !log_path.exists() {
-        return Err(PfError::NotFound(format!("No logs for '{name}'")));
+        return Err(PfError::NotFound(format!("No logs for '{host}'")));
     }
 
     if follow {

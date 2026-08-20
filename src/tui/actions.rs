@@ -1,17 +1,22 @@
 use crate::process;
 use crate::watcher;
 
-pub fn start_profile(name: &str, host: &str, local_port: u16, remote_port: u16) -> Result<String, String> {
-    match watcher::spawn_watcher(
-        name,
+pub fn start_profile(
+    name: &str,
+    host: &str,
+    local_port: u16,
+    remote_port: u16,
+) -> Result<String, String> {
+    match process::start_forward(
         host,
+        name,
         local_port,
-        remote_port,
         "localhost",
+        remote_port,
         true,
         watcher::RetryPolicy::default(),
     ) {
-        Ok(_pid) => Ok(format!("Started {name}")),
+        Ok(()) => Ok(format!("Started {name}")),
         Err(e) => Err(format!("Failed to start {name}: {e}")),
     }
 }
@@ -22,23 +27,23 @@ pub fn start_adhoc(
     remote_port: u16,
     name: Option<&str>,
 ) -> Result<String, String> {
-    let fwd_name = name.unwrap_or_else(|| "").to_string();
+    let fwd_name = name.unwrap_or("").to_string();
     let fwd_name = if fwd_name.is_empty() {
         format!("{}-{}", host, local_port)
     } else {
         fwd_name
     };
 
-    match watcher::spawn_watcher(
-        &fwd_name,
+    match process::start_forward(
         host,
+        &fwd_name,
         local_port,
-        remote_port,
         "localhost",
+        remote_port,
         true,
         watcher::RetryPolicy::default(),
     ) {
-        Ok(_pid) => Ok(format!("Started {fwd_name}")),
+        Ok(()) => Ok(format!("Started {fwd_name}")),
         Err(e) => Err(format!("Failed to start {fwd_name}: {e}")),
     }
 }
@@ -64,12 +69,12 @@ pub fn restart_forward(name: &str) -> Result<String, String> {
     // Brief pause for cleanup
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    match watcher::spawn_watcher(
-        &state.name,
+    match process::start_forward(
         &state.host,
+        &state.name,
         state.local_port,
-        state.remote_port,
         &state.remote_host,
+        state.remote_port,
         state.auto_reconnect,
         watcher::RetryPolicy {
             max_retries: state.max_retries,
@@ -77,7 +82,7 @@ pub fn restart_forward(name: &str) -> Result<String, String> {
             max_delay: state.max_retry_delay,
         },
     ) {
-        Ok(_pid) => Ok(format!("Restarted {name}")),
+        Ok(()) => Ok(format!("Restarted {name}")),
         Err(e) => Err(format!("Failed to restart {name}: {e}")),
     }
 }

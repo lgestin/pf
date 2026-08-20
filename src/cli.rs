@@ -46,6 +46,10 @@ pub enum Command {
         /// Stop all forwards
         #[arg(long)]
         all: bool,
+
+        /// Stop every forward on this machine
+        #[arg(long, conflicts_with_all = ["name", "all"])]
+        host: Option<String>,
     },
 
     /// List all forwards
@@ -68,11 +72,15 @@ pub enum Command {
     /// View watcher log
     Logs {
         /// Forward name
-        name: String,
+        name: Option<String>,
 
         /// Follow (tail) the log
         #[arg(short, long)]
         follow: bool,
+
+        /// Show the session log for this machine
+        #[arg(long, conflicts_with = "name")]
+        host: Option<String>,
     },
 
     /// Manage saved profiles
