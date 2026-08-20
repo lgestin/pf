@@ -1,5 +1,5 @@
 use super::state::{AppState, ConfirmAction, InputField, Mode};
-use super::tree::{MachineRow, Row, Sel};
+use super::tree::{self, MachineRow, Row, Sel};
 use crate::process;
 use crate::session::{AttachStatus, SessionStatus};
 use chrono::{DateTime, Utc};
@@ -38,7 +38,8 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(8),
+            Constraint::Length(1),
+            Constraint::Min(6),
             Constraint::Length(if matches!(app.mode, Mode::Normal | Mode::Filter) {
                 0
             } else {
@@ -48,16 +49,17 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
         ])
         .split(f.area());
 
-    render_tree(f, app, chunks[0]);
+    f.render_widget(Paragraph::new(header_line(app)), chunks[0]);
+    render_tree(f, app, chunks[1]);
 
     let mode = app.mode.clone();
     match &mode {
-        Mode::Logs => render_log_panel(f, app, chunks[1]),
-        Mode::NewForward => render_new_forward_form(f, app, chunks[1]),
+        Mode::Logs => render_log_panel(f, app, chunks[2]),
+        Mode::NewForward => render_new_forward_form(f, app, chunks[2]),
         Mode::Normal | Mode::Filter | Mode::ProfilePicker | Mode::Confirm(_) | Mode::Help => {}
     }
 
-    render_status_bar(f, app, chunks[2]);
+    render_status_bar(f, app, chunks[3]);
 
     if matches!(mode, Mode::ProfilePicker) {
         render_profile_picker(f, app);
@@ -321,41 +323,35 @@ fn short_error(err: &str) -> String {
     }
 }
 
-/// ` pf ─ 2 of 12 connected ` — the one number worth reading from across a room.
-fn tree_title(app: &AppState) -> Line<'static> {
-    let connected = app
-        .machines
-        .iter()
-        .filter(|m| machine_state(m) == Some(SessionStatus::Connected))
-        .count();
-    let total = app.machines.len();
-
+/// ` pf  ·  all hosts ` — the app, and which list it is showing. The counts
+/// live on the boxes themselves, so repeating them here would say it twice.
+fn header_line(app: &AppState) -> Line<'static> {
     let mut spans = vec![
         Span::raw(" "),
         Span::styled("pf", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-        Span::styled("  ", mute()),
+        Span::styled("  ·  ", mute()),
     ];
 
     if app.filter.is_empty() {
-        // The count carries the state it is counting; zero is pf's resting
-        // state, not an alarm, so it stays quiet rather than turning red.
-        let count_style = if connected > 0 {
-            Style::default().fg(OK).add_modifier(Modifier::BOLD)
-        } else {
-            mute()
-        };
-        spans.push(Span::styled(connected.to_string(), count_style));
-        spans.push(Span::styled(format!(" of {total} connected"), Style::default()));
-        spans.push(Span::styled(
-            format!("  ·  {} ", app.machine_source.label()),
-            mute(),
-        ));
+        spans.push(Span::styled(app.machine_source.label(), mute()));
     } else {
         spans.push(Span::styled(format!("/{}", app.filter), Style::default().fg(ACCENT)));
-        spans.push(Span::styled(format!("  ·  {total} shown "), mute()));
+        spans.push(Span::styled(
+            format!("  ·  {} shown", app.machines.len()),
+            mute(),
+        ));
     }
 
     Line::from(spans)
+}
+
+/// ` sessions · 2 ` — a box's name and how many machines it holds.
+fn box_title(name: &'static str, count: usize) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled(name, Style::default()),
+        Span::styled(format!(" · {count} "), mute()),
+    ])
 }
 
 fn render_tree(f: &mut Frame, app: &mut AppState, area: Rect) {
@@ -388,18 +384,126 @@ fn render_tree(f: &mut Frame, app: &mut AppState, area: Rect) {
         })
         .collect();
 
-    let block = Block::default()
-        .title(tree_title(app))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(mute());
-
     if rows.is_empty() {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(mute());
         render_empty_state(f, app, block, area);
         return;
     }
 
-    let table = Table::new(
+    // Counts name machines, not rows — a session's forwards are not sessions.
+    let live_machines = app.machines.iter().filter(|m| m.is_live()).count();
+    let idle_machines = app.machines.len() - live_machines;
+
+    // Live sessions sort first, so the split is a count. A list that is all
+    // one kind has nothing to divide and stays a single box — which is the
+    // common case both ways: everything idle, or a filter down to one host.
+    let split = tree::live_rows(&app.rows, &app.machines);
+    if split == 0 || split == rows.len() {
+        let selected = app.table_state.selected();
+        app.live_state.select(selected);
+        *app.live_state.offset_mut() = app.table_state.offset();
+
+        // Whichever kind the list is entirely made of names the one box.
+        let (name, count, with_header) = if split == 0 {
+            ("hosts", idle_machines, false)
+        } else {
+            ("sessions", live_machines, true)
+        };
+        let visible = render_machine_table(
+            f,
+            rows,
+            header,
+            box_title(name, count),
+            area,
+            &mut app.live_state,
+            with_header,
+        );
+        app.tree_visible = visible;
+        *app.table_state.offset_mut() = app.live_state.offset();
+        return;
+    }
+
+    let (live, idle) = rows.split_at(split);
+
+    // Space goes to the box that needs it: when only one group overflows, the
+    // other takes exactly its content and the rest is the overflowing box's.
+    // Only when both overflow is the screen split down the middle.
+    let live_want = live.len() as u16 + 3; // borders + header
+    let idle_want = idle.len() as u16 + 2; // borders
+    let half = area.height / 2;
+    let live_h = if live_want + idle_want <= area.height {
+        live_want
+    } else if idle_want <= half {
+        area.height - idle_want
+    } else if live_want <= half {
+        live_want
+    } else {
+        area.height * 55 / 100
+    }
+    // Neither box drops below a usable height.
+    .clamp(4, area.height.saturating_sub(3).max(4));
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(live_h), Constraint::Min(3)])
+        .split(area);
+
+    // One logical cursor across both boxes: the box that holds it shows the
+    // rail, the other keeps its scroll position and shows nothing.
+    let selected = app.table_state.selected().unwrap_or(0);
+    if selected < split {
+        app.live_state.select(Some(selected));
+        app.idle_state.select(None);
+    } else {
+        app.live_state.select(None);
+        app.idle_state.select(Some(selected - split));
+    }
+
+    let live_visible = render_machine_table(
+        f,
+        live.to_vec(),
+        header,
+        box_title("sessions", live_machines),
+        chunks[0],
+        &mut app.live_state,
+        true,
+    );
+    let idle_visible = render_machine_table(
+        f,
+        idle.to_vec(),
+        TRow::new(Vec::<Cell>::new()),
+        box_title("hosts", idle_machines),
+        chunks[1],
+        &mut app.idle_state,
+        false,
+    );
+
+    // Paging moves by the box the cursor is actually in.
+    app.tree_visible = if selected < split { live_visible } else { idle_visible };
+}
+
+/// Draw one box of machine rows. Returns how many rows its viewport holds, so
+/// paging can move by a real page. `header` is drawn only when `with_header`.
+fn render_machine_table(
+    f: &mut Frame,
+    rows: Vec<TRow<'static>>,
+    header: TRow<'static>,
+    title: Line<'static>,
+    area: Rect,
+    state: &mut ratatui::widgets::TableState,
+    with_header: bool,
+) -> usize {
+    let total = rows.len();
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(mute());
+
+    let mut table = Table::new(
         rows,
         [
             Constraint::Length(1),
@@ -409,7 +513,6 @@ fn render_tree(f: &mut Frame, app: &mut AppState, area: Rect) {
             Constraint::Length(4),
         ],
     )
-    .header(header)
     .column_spacing(1)
     // A plain 8-colour background rather than an indexed shade: it renders on
     // any theme, where a 256-colour dark grey assumes a dark one.
@@ -419,15 +522,16 @@ fn render_tree(f: &mut Frame, app: &mut AppState, area: Rect) {
     .highlight_symbol(Span::styled("▌", Style::default().fg(ACCENT)))
     .highlight_spacing(HighlightSpacing::Always)
     .block(block);
+    if with_header {
+        table = table.header(header);
+    }
 
-    f.render_stateful_widget(table, area, &mut app.table_state);
+    f.render_stateful_widget(table, area, state);
 
-    let visible = area.height.saturating_sub(3) as usize;
-    // Remembered so PageUp/PageDown and ctrl-d/u can move by what a "page"
-    // actually is on this terminal.
-    app.tree_visible = visible;
-    if app.rows.len() > visible {
-        let mut sb = ScrollbarState::new(app.rows.len()).position(app.table_state.offset());
+    let chrome = if with_header { 3 } else { 2 };
+    let visible = area.height.saturating_sub(chrome) as usize;
+    if total > visible {
+        let mut sb = ScrollbarState::new(total).position(state.offset());
         // Inset vertically so the track cannot paint over the block's corners.
         let track = area.inner(ratatui::layout::Margin {
             horizontal: 0,
@@ -443,6 +547,7 @@ fn render_tree(f: &mut Frame, app: &mut AppState, area: Rect) {
             &mut sb,
         );
     }
+    visible
 }
 
 /// An empty screen is an invitation to act, so say what to press.
@@ -1057,6 +1162,88 @@ mod tests {
     }
 
     #[test]
+    fn the_boxes_name_themselves_and_count_their_machines() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &["bastion", "nas"]);
+        let text = draw(&mut app, 90, 16);
+
+        // Machines, not rows — a session's forwards are not sessions.
+        assert!(text.contains("sessions · 1"), "sessions box mistitled:\n{text}");
+        assert!(text.contains("hosts · 2"), "hosts box mistitled:\n{text}");
+        assert!(text.contains("gpu-01"), "connected machine missing:\n{text}");
+        assert!(text.contains("bastion"), "available machine missing:\n{text}");
+    }
+
+    #[test]
+    fn the_header_names_the_app_and_the_list_it_shows() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &["bastion", "nas"]);
+        let text = draw(&mut app, 90, 16);
+
+        assert!(text.contains("pf"), "the app lost its name:\n{text}");
+        assert!(text.contains("all hosts"), "which list is shown is missing:\n{text}");
+        // Each box carries its own count now, so the header saying it again
+        // was saying it twice.
+        assert!(
+            !text.contains("of 3 connected"),
+            "the header still duplicates the box counts:\n{text}"
+        );
+    }
+
+    #[test]
+    fn a_list_of_one_kind_stays_a_single_box_named_for_its_kind() {
+        // pf's resting state is nothing connected. A second box under an
+        // empty "sessions" one would be all frame and no information.
+        let mut app = app_with(vec![], &["bastion", "nas"]);
+        let text = draw(&mut app, 90, 14);
+        assert!(text.contains("hosts · 2"), "the one box should be hosts:\n{text}");
+        assert!(!text.contains("sessions ·"), "no sessions to show:\n{text}");
+
+        let mut app = app_with(vec![live("gpu-01", vec![]), live("gpu-02", vec![])], &[]);
+        let text = draw(&mut app, 90, 14);
+        assert!(text.contains("sessions · 2"), "the one box should be sessions:\n{text}");
+        assert!(!text.contains("hosts ·"), "nothing is unconnected:\n{text}");
+    }
+
+    #[test]
+    fn a_cramped_screen_gives_each_box_what_it_needs() {
+        // A long live box and two idle hosts. The idle box should take the
+        // three rows it needs and leave the rest to the box that is starved,
+        // rather than reserving half the screen and sitting half empty.
+        let forwards: Vec<ForwardObs> = (1..=8)
+            .map(|i| obs(&format!("f{i}"), 8880 + i, AttachStatus::Forwarded))
+            .collect();
+        let mut app = app_with(vec![live("gpu-01", forwards)], &["bastion", "nas"]);
+
+        let text = draw(&mut app, 90, 15);
+        assert!(text.contains("bastion"), "idle host lost:\n{text}");
+        assert!(text.contains("nas"), "idle host lost:\n{text}");
+        assert!(
+            text.contains("8885"),
+            "the live box was starved while the idle box sat half empty:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_cursor_shows_in_whichever_box_holds_it() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &["bastion", "nas"]);
+
+        // Row 0 is the live machine; rows 1 and 2 are idle.
+        app.select(2);
+        let mut terminal = Terminal::new(TestBackend::new(90, 16)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        // The cursor rail sits on the selected row, inside the idle box.
+        let buf = terminal.backend().buffer();
+        let rail_row = (0..buf.area.height).find(|y| {
+            (0..buf.area.width).any(|x| buf[(x, *y)].symbol() == "▌")
+        });
+        let rail_row = rail_row.expect("the cursor rail vanished");
+        let line: String = (0..buf.area.width)
+            .map(|x| buf[(x, rail_row)].symbol())
+            .collect();
+        assert!(line.contains("nas"), "cursor is not on the selected row: {line:?}");
+    }
+
+    #[test]
     fn in_progress_lamps_animate_across_frames() {
         // A frozen ◐ reads as stuck rather than working, and the screen is
         // already being redrawn — the motion is free.
@@ -1099,27 +1286,6 @@ mod tests {
             &[],
         );
         assert!(moving.needs_animation(), "a pending forward should animate");
-    }
-
-    #[test]
-    fn the_connected_count_carries_its_own_colour() {
-        // The one number worth reading from across a room.
-        let mut app = app_with(vec![live("gpu-01", vec![])], &["nas", "bastion"]);
-        let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
-        terminal.draw(|f| render(f, &mut app)).unwrap();
-
-        // "1 of 3 connected" — the leading 1 is the count.
-        assert_eq!(fg_of(&terminal, "1"), Some(OK), "the count should read as live");
-    }
-
-    #[test]
-    fn a_zero_connected_count_stays_quiet() {
-        // Nothing connected is pf's resting state, not an alarm.
-        let mut app = app_with(vec![], &["nas", "bastion"]);
-        let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
-        terminal.draw(|f| render(f, &mut app)).unwrap();
-
-        assert_eq!(fg_of(&terminal, "0"), Some(MUTE), "zero should not shout");
     }
 
     #[test]
@@ -1185,12 +1351,6 @@ mod tests {
         assert!(text.contains("↻3"), "reconnect count missing:\n{text}");
     }
 
-    #[test]
-    fn the_title_counts_connected_machines() {
-        let mut app = app_with(vec![live("gpu-01", vec![])], &["nas", "bastion"]);
-        let text = draw(&mut app, 90, 12);
-        assert!(text.contains("1 of 3 connected"), "title count missing:\n{text}");
-    }
 
     #[test]
     fn ssh_errors_compress_to_something_that_fits_a_cell() {
@@ -1376,7 +1536,7 @@ mod tests {
         app.rows = tree::flatten(&app.machines, &app.expanded);
         app.select(1);
 
-        let mut terminal = Terminal::new(TestBackend::new(76, 12)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(76, 16)).unwrap();
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let buf = terminal.backend().buffer();
         println!();

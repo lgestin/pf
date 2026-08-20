@@ -88,6 +88,10 @@ pub struct AppState {
     pub rows: Vec<Row>,
     pub expanded: HashSet<String>,
     pub table_state: TableState,
+    /// One viewport per box, so each keeps its own scroll position while the
+    /// cursor lives in the other.
+    pub live_state: TableState,
+    pub idle_state: TableState,
     /// Identity-keyed selection, so a refresh cannot fling the cursor around.
     pub sel: Option<Sel>,
     pub machine_source: MachineListMode,
@@ -161,6 +165,8 @@ impl AppState {
             rows: Vec::new(),
             expanded: HashSet::new(),
             table_state: TableState::new().with_selected(Some(0)),
+            live_state: TableState::new(),
+            idle_state: TableState::new(),
             sel: None,
             machine_source,
             filter: String::new(),

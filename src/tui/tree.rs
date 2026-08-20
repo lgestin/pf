@@ -70,6 +70,29 @@ pub enum Row {
     Forward(usize, usize),
 }
 
+impl Row {
+    /// The machine this row belongs to — itself, or its parent.
+    pub fn machine_index(&self) -> usize {
+        match self {
+            Row::Machine(mi) | Row::Forward(mi, _) => *mi,
+        }
+    }
+}
+
+/// How many leading rows belong to live machines.
+///
+/// Live sessions sort first, so the split between the two boxes is just a
+/// count: rows before it go in the top box, rows from it on in the bottom.
+pub fn live_rows(rows: &[Row], machines: &[MachineRow]) -> usize {
+    rows.iter()
+        .take_while(|r| {
+            machines
+                .get(r.machine_index())
+                .is_some_and(|m| m.is_live())
+        })
+        .count()
+}
+
 /// A selection that survives a refresh, keyed by identity rather than position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sel {
@@ -236,6 +259,50 @@ mod tests {
         s.status = SessionStatus::Connected;
         s.forwards = forwards.iter().map(|(n, p)| obs(n, *p)).collect();
         s
+    }
+
+    #[test]
+    fn the_live_rows_are_the_prefix_the_top_box_holds() {
+        // Live sessions sort first, so the split is a count: everything
+        // before it belongs to the live box, everything after to the idle one.
+        // A machine's forwards go with it.
+        let machines = build_machines(
+            vec![live("gpu-01", &[("jupyter", 8888), ("tb", 6006)])],
+            &BTreeSet::new(),
+            &hosts(&["bastion", "nas"]),
+            MachineListMode::AllHosts,
+            "",
+        );
+        let mut expanded = HashSet::new();
+        expanded.insert("gpu-01".to_string());
+        let rows = flatten(&machines, &expanded);
+
+        // gpu-01 plus its two forwards.
+        assert_eq!(live_rows(&rows, &machines), 3);
+        assert_eq!(rows.len(), 5, "the two idle hosts follow");
+    }
+
+    #[test]
+    fn a_list_of_one_kind_puts_everything_on_one_side() {
+        let all_idle = build_machines(
+            Vec::new(),
+            &BTreeSet::new(),
+            &hosts(&["bastion", "nas"]),
+            MachineListMode::AllHosts,
+            "",
+        );
+        let rows = flatten(&all_idle, &HashSet::new());
+        assert_eq!(live_rows(&rows, &all_idle), 0, "nothing is live");
+
+        let all_live = build_machines(
+            vec![live("gpu-01", &[]), live("gpu-02", &[])],
+            &BTreeSet::new(),
+            &[],
+            MachineListMode::AllHosts,
+            "",
+        );
+        let rows = flatten(&all_live, &all_live.iter().map(|m| m.host.clone()).collect());
+        assert_eq!(live_rows(&rows, &all_live), rows.len(), "everything is live");
     }
 
     fn profiles(hosts: &[&str]) -> BTreeSet<String> {
