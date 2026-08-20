@@ -157,29 +157,36 @@ fn machine_state(machine: &MachineRow) -> Option<SessionStatus> {
     Some(session.status)
 }
 
+/// The in-progress lamp, turning. A frozen glyph reads as stuck; the screen is
+/// already being redrawn while anything is connecting, so the motion is free.
+fn spinner(frame: usize) -> &'static str {
+    const FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
+    FRAMES[frame % FRAMES.len()]
+}
+
 /// Lamp, word, and colour for a machine — one source of truth, so the glyph and
 /// the label can never drift apart.
-fn machine_look(state: Option<SessionStatus>) -> (&'static str, &'static str, Color) {
+fn machine_look(state: Option<SessionStatus>, frame: usize) -> (&'static str, &'static str, Color) {
     match state {
         Some(SessionStatus::Connected) => ("●", "connected", OK),
-        Some(SessionStatus::Connecting) => ("◐", "connecting", WARN),
-        Some(SessionStatus::Reconnecting) => ("◐", "reconnecting", WARN),
+        Some(SessionStatus::Connecting) => (spinner(frame), "connecting", WARN),
+        Some(SessionStatus::Reconnecting) => (spinner(frame), "reconnecting", WARN),
         Some(SessionStatus::Failed) => ("✕", "failed", BAD),
         None => ("○", "", MUTE),
     }
 }
 
-fn forward_look(status: AttachStatus) -> (&'static str, &'static str, Color) {
+fn forward_look(status: AttachStatus, frame: usize) -> (&'static str, &'static str, Color) {
     match status {
         AttachStatus::Forwarded => ("●", "forwarded", OK),
-        AttachStatus::Pending => ("◐", "pending", WARN),
+        AttachStatus::Pending => (spinner(frame), "pending", WARN),
         AttachStatus::Failed => ("✕", "failed", BAD),
     }
 }
 
-fn machine_row(machine: &MachineRow, expanded: bool) -> TRow<'static> {
+fn machine_row(machine: &MachineRow, expanded: bool, frame: usize) -> TRow<'static> {
     let state = machine_state(machine);
-    let (lamp_sym, status_text, lamp_color) = machine_look(state);
+    let (lamp_sym, status_text, lamp_color) = machine_look(state, frame);
 
     let marker = if machine.forwards.is_empty() {
         " "
@@ -233,11 +240,11 @@ fn machine_row(machine: &MachineRow, expanded: bool) -> TRow<'static> {
     ])
 }
 
-fn forward_row(machine: &MachineRow, fi: usize) -> TRow<'static> {
+fn forward_row(machine: &MachineRow, fi: usize, frame: usize) -> TRow<'static> {
     let f = &machine.forwards[fi];
     let last = fi + 1 == machine.forwards.len();
 
-    let (lamp_sym, status_text, lamp_color) = forward_look(f.status);
+    let (lamp_sym, status_text, lamp_color) = forward_look(f.status, frame);
 
     // Guides make the parent-child relation visible rather than implied by
     // whitespace, which matters once several machines are expanded at once.
@@ -330,10 +337,15 @@ fn tree_title(app: &AppState) -> Line<'static> {
     ];
 
     if app.filter.is_empty() {
-        spans.push(Span::styled(
-            format!("{connected} of {total} connected"),
-            Style::default(),
-        ));
+        // The count carries the state it is counting; zero is pf's resting
+        // state, not an alarm, so it stays quiet rather than turning red.
+        let count_style = if connected > 0 {
+            Style::default().fg(OK).add_modifier(Modifier::BOLD)
+        } else {
+            mute()
+        };
+        spans.push(Span::styled(connected.to_string(), count_style));
+        spans.push(Span::styled(format!(" of {total} connected"), Style::default()));
         spans.push(Span::styled(
             format!("  ·  {} ", app.machine_source.label()),
             mute(),
@@ -362,11 +374,16 @@ fn render_tree(f: &mut Frame, app: &mut AppState, area: Rect) {
         .filter_map(|row| match row {
             Row::Machine(mi) => {
                 let machine = app.machines.get(*mi)?;
-                Some(machine_row(machine, app.expanded.contains(&machine.host)))
+                Some(machine_row(
+                    machine,
+                    app.expanded.contains(&machine.host),
+                    app.spin_frame,
+                ))
             }
             Row::Forward(mi, fi) => {
                 let machine = app.machines.get(*mi)?;
-                (*fi < machine.forwards.len()).then(|| forward_row(machine, *fi))
+                (*fi < machine.forwards.len())
+                    .then(|| forward_row(machine, *fi, app.spin_frame))
             }
         })
         .collect();
@@ -1039,6 +1056,72 @@ mod tests {
     }
 
     #[test]
+    fn in_progress_lamps_animate_across_frames() {
+        // A frozen ◐ reads as stuck rather than working, and the screen is
+        // already being redrawn — the motion is free.
+        let a = machine_look(Some(SessionStatus::Connecting), 0).0;
+        let b = machine_look(Some(SessionStatus::Connecting), 1).0;
+        assert_ne!(a, b, "a connecting machine should animate");
+
+        assert_ne!(
+            forward_look(AttachStatus::Pending, 0).0,
+            forward_look(AttachStatus::Pending, 1).0,
+            "a pending forward should animate"
+        );
+        // One spinner everywhere, so the whole screen turns together.
+        assert_eq!(forward_look(AttachStatus::Pending, 0).0, a);
+    }
+
+    #[test]
+    fn settled_lamps_hold_still() {
+        for frame in 0..8 {
+            assert_eq!(machine_look(Some(SessionStatus::Connected), frame).0, "●");
+            assert_eq!(machine_look(Some(SessionStatus::Failed), frame).0, "✕");
+            assert_eq!(machine_look(None, frame).0, "○");
+            assert_eq!(forward_look(AttachStatus::Forwarded, frame).0, "●");
+            assert_eq!(forward_look(AttachStatus::Failed, frame).0, "✕");
+        }
+    }
+
+    #[test]
+    fn only_a_transitional_screen_asks_to_animate() {
+        // Redrawing four times a second is only worth it while something is
+        // actually in motion.
+        let settled = app_with(
+            vec![live("gpu-01", vec![obs("a", 8888, AttachStatus::Forwarded)])],
+            &["nas"],
+        );
+        assert!(!settled.needs_animation(), "a settled screen should stay still");
+
+        let moving = app_with(
+            vec![live("gpu-01", vec![obs("a", 8888, AttachStatus::Pending)])],
+            &[],
+        );
+        assert!(moving.needs_animation(), "a pending forward should animate");
+    }
+
+    #[test]
+    fn the_connected_count_carries_its_own_colour() {
+        // The one number worth reading from across a room.
+        let mut app = app_with(vec![live("gpu-01", vec![])], &["nas", "bastion"]);
+        let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        // "1 of 3 connected" — the leading 1 is the count.
+        assert_eq!(fg_of(&terminal, "1"), Some(OK), "the count should read as live");
+    }
+
+    #[test]
+    fn a_zero_connected_count_stays_quiet() {
+        // Nothing connected is pf's resting state, not an alarm.
+        let mut app = app_with(vec![], &["nas", "bastion"]);
+        let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        assert_eq!(fg_of(&terminal, "0"), Some(MUTE), "zero should not shout");
+    }
+
+    #[test]
     fn a_lamp_and_its_word_can_never_disagree() {
         // Both come from one lookup, so a future edit cannot colour the glyph
         // green while the label says failed.
@@ -1049,7 +1132,7 @@ mod tests {
             Some(SessionStatus::Failed),
             None,
         ] {
-            let (sym, word, color) = machine_look(state);
+            let (sym, word, color) = machine_look(state, 0);
             assert!(!sym.is_empty(), "every state needs a lamp");
             if state.is_none() {
                 assert!(word.is_empty(), "idle stays quiet");

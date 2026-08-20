@@ -94,6 +94,8 @@ pub struct AppState {
     pub filter: String,
     /// Rows the tree viewport held at the last render; the paging distance.
     pub tree_visible: usize,
+    /// Which frame the in-progress spinner is on.
+    pub spin_frame: usize,
     /// True until the first refresh, which seeds the fold state.
     first_refresh: bool,
     /// Hosts that were live at the last refresh, so only a machine that has
@@ -163,6 +165,7 @@ impl AppState {
             machine_source,
             filter: String::new(),
             tree_visible: 20,
+            spin_frame: 0,
             first_refresh: true,
             live_hosts: HashSet::new(),
             profiles: Vec::new(),
@@ -234,6 +237,24 @@ impl AppState {
             self.pending_label = None;
         }
         any
+    }
+
+    /// True while anything on screen is mid-flight, which is the only time
+    /// redrawing several times a second buys anything.
+    pub fn needs_animation(&self) -> bool {
+        self.pending_actions > 0
+            || self.machines.iter().any(|m| {
+                m.session.as_ref().is_some_and(|s| {
+                    matches!(
+                        s.status,
+                        crate::session::SessionStatus::Connecting
+                            | crate::session::SessionStatus::Reconnecting
+                    )
+                }) || m
+                    .forwards
+                    .iter()
+                    .any(|f| f.status == crate::session::AttachStatus::Pending)
+            })
     }
 
     pub fn selected(&self) -> usize {

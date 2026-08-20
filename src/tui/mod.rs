@@ -61,7 +61,9 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
     app.refresh();
 
     let tick_rate = Duration::from_secs(1);
+    let spin_rate = Duration::from_millis(250);
     let mut last_tick = Instant::now();
+    let mut last_spin = Instant::now();
 
     loop {
         terminal.draw(|f| ui::render(f, &mut app))?;
@@ -73,6 +75,11 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
         let mut timeout = tick_rate.saturating_sub(last_tick.elapsed());
         if app.pending_actions > 0 {
             timeout = timeout.min(Duration::from_millis(100));
+        }
+        // A spinner only turns while something is turning; an idle screen
+        // keeps its one-second tick and stays cheap.
+        if app.needs_animation() {
+            timeout = timeout.min(spin_rate.saturating_sub(last_spin.elapsed()));
         }
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
@@ -87,6 +94,11 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<(
                 }
                 handle_key(&mut app, key);
             }
+        }
+
+        if app.needs_animation() && last_spin.elapsed() >= spin_rate {
+            app.spin_frame = app.spin_frame.wrapping_add(1);
+            last_spin = Instant::now();
         }
 
         if last_tick.elapsed() >= tick_rate {
