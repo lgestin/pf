@@ -453,6 +453,9 @@ fn render_new_forward_form(f: &mut Frame, app: &AppState, area: Rect) {
         })
         .collect();
 
+    let local = app.input_local_port.trim();
+    let host = app.input_host.trim();
+
     for (i, (field, value)) in entries.iter().enumerate() {
         let active = *field == app.input_field;
         let label_style = if active {
@@ -460,47 +463,36 @@ fn render_new_forward_form(f: &mut Frame, app: &AppState, area: Rect) {
         } else {
             mute()
         };
-        let cursor = if active { "_" } else { "" };
 
-        let mut spans = vec![
-            Span::styled(format!("{:>12}  ", field.label()), label_style),
-            Span::raw(format!("{value}{cursor}")),
-        ];
+        // What an empty field will actually submit, and why. Shown dim, with
+        // the cursor after it, so the field reads as already holding the value
+        // it is going to use rather than as empty with a note beside it.
+        let (ghost, note): (String, &str) = match field {
+            InputField::RemotePort if !local.is_empty() => {
+                (local.to_string(), "same as local")
+            }
+            InputField::Name if !local.is_empty() && !host.is_empty() => {
+                (format!("{host}-{local}"), "generated")
+            }
+            InputField::Host => (String::new(), "hostname, IP, or user@host"),
+            _ => (String::new(), ""),
+        };
 
-        // Show what an empty remote port will become, so the default is
-        // visible rather than a surprise on submit.
-        if *field == InputField::RemotePort
-            && value.is_empty()
-            && !app.input_local_port.trim().is_empty()
-        {
-            spans.push(Span::styled(
-                format!("{}  same as local", app.input_local_port.trim()),
-                mute(),
-            ));
+        let mut spans = vec![Span::styled(
+            format!("{:>12}  ", field.label()),
+            label_style,
+        )];
+
+        if value.is_empty() {
+            spans.push(Span::styled(ghost.clone(), mute()));
+        } else {
+            spans.push(Span::raw(value.to_string()));
         }
-        // A blank name gets generated the same way the CLI does it.
-        if *field == InputField::Name
-            && value.is_empty()
-            && !app.input_local_port.trim().is_empty()
-            && !app.input_host.trim().is_empty()
-        {
-            spans.push(Span::styled(
-                format!(
-                    "{}-{}",
-                    app.input_host.trim(),
-                    app.input_local_port.trim()
-                ),
-                mute(),
-            ));
+        if active {
+            spans.push(Span::raw("_"));
         }
-
-        // The host is free text on purpose: if it were in ~/.ssh/config it
-        // would already be a row in the tree.
-        if *field == InputField::Host && value.is_empty() {
-            spans.push(Span::styled(
-                "hostname, IP, or user@host".to_string(),
-                mute(),
-            ));
+        if value.is_empty() && !note.is_empty() {
+            spans.push(Span::styled(format!("  {note}"), mute()));
         }
 
         f.render_widget(Paragraph::new(Line::from(spans)), fields[i]);
@@ -1038,6 +1030,45 @@ mod tests {
         println!();
     }
 
+    /// `cargo test preview_form -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn preview_form() {
+        for (label, setup) in [
+            ("add to a known machine, on Remote Port", 0usize),
+            ("add to a known machine, on Name", 1),
+            ("connect to an unlisted machine", 2),
+        ] {
+            let mut app = app_with(vec![live("gpu-01", vec![])], &[]);
+            match setup {
+                0 => {
+                    app.open_new_forward_form("gpu-01".to_string());
+                    app.input_local_port = "8888".to_string();
+                    app.input_field = InputField::RemotePort;
+                }
+                1 => {
+                    app.open_new_forward_form("gpu-01".to_string());
+                    app.input_local_port = "8888".to_string();
+                    app.input_field = InputField::Name;
+                }
+                _ => app.open_new_machine_form(),
+            }
+
+            let mut terminal = Terminal::new(TestBackend::new(64, 26)).unwrap();
+            terminal.draw(|f| render(f, &mut app)).unwrap();
+            let buf = terminal.backend().buffer();
+            println!("\n{label}");
+            for y in 0..buf.area.height {
+                let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                let line = line.trim_end();
+                if !line.is_empty() {
+                    println!("{line}");
+                }
+            }
+        }
+        println!();
+    }
+
     /// Not an assertion — prints the layout so it can be eyeballed.
     /// `cargo test preview_layout -- --nocapture --ignored`
     #[test]
@@ -1154,6 +1185,39 @@ mod tests {
         assert!(
             text.contains("gpu-01-8888"),
             "the generated name is invisible:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_cursor_sits_after_the_value_a_field_will_submit() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &[]);
+        app.open_new_forward_form("gpu-01".to_string());
+        app.input_local_port = "8888".to_string();
+
+        // On Remote Port, which is empty and will default to the local port.
+        app.input_field = InputField::RemotePort;
+        let text = draw(&mut app, 90, 24);
+        assert!(
+            text.contains("8888_  same as local"),
+            "cursor should follow the defaulted value, not precede it:\n{text}"
+        );
+
+        // Same rule for the generated name.
+        app.input_field = InputField::Name;
+        let text = draw(&mut app, 90, 24);
+        assert!(
+            text.contains("gpu-01-8888_"),
+            "cursor should follow the generated name:\n{text}"
+        );
+
+        // And for a field the user has actually typed into.
+        app.input_field = InputField::RemotePort;
+        app.input_remote_port = "80".to_string();
+        let text = draw(&mut app, 90, 24);
+        assert!(text.contains("80_"), "cursor should follow typed input:\n{text}");
+        assert!(
+            !text.contains("same as local"),
+            "the default note should go once a value is typed:\n{text}"
         );
     }
 }
