@@ -247,11 +247,18 @@ fn submit_new_forward(app: &mut AppState) {
             return;
         }
     };
-    let remote: u16 = match app.input_remote_port.trim().parse() {
-        Ok(p) => p,
-        Err(_) => {
-            app.status_message = Some("Remote port must be a number".to_string());
-            return;
+    // Same port on both sides is the common case, so an empty remote port
+    // mirrors the local one rather than being an error.
+    let remote_raw = app.input_remote_port.trim();
+    let remote: u16 = if remote_raw.is_empty() {
+        local
+    } else {
+        match remote_raw.parse() {
+            Ok(p) => p,
+            Err(_) => {
+                app.status_message = Some("Remote port must be a number".to_string());
+                return;
+            }
         }
     };
 

@@ -104,13 +104,13 @@ fn machine_row(machine: &MachineRow, expanded: bool) -> TRow<'static> {
         "▸"
     };
 
-    // Live machines carry the eye; idle ones recede. In a healthy system
-    // nothing should shout, so only trouble gets full brightness.
+    // Hierarchy comes from weight, not darkness: a live machine is bold, an
+    // idle one is plain. Dimming hostnames made a disconnected screen
+    // unreadable, since most of an all-hosts list is idle.
     let host_style = match state {
         Some(SessionStatus::Connected) => Style::default().add_modifier(Modifier::BOLD),
         Some(SessionStatus::Failed) => Style::default().fg(BAD).add_modifier(Modifier::BOLD),
-        Some(_) => Style::default(),
-        None => mute(),
+        _ => Style::default(),
     };
 
     let mut label = vec![
@@ -174,14 +174,13 @@ fn forward_row(machine: &MachineRow, fi: usize) -> TRow<'static> {
         Style::default()
     };
 
+    // Only the guide and the arrow are structure; the ports themselves are the
+    // payload and stay at full readability.
     let label = vec![
         Span::styled(guide, mute()),
         Span::styled(f.local_port.to_string(), port_style),
         Span::styled(" → ", mute()),
-        Span::styled(
-            format!("{}:{}", f.remote_host, f.remote_port),
-            Style::default().fg(MUTE),
-        ),
+        Span::styled(format!("{}:{}", f.remote_host, f.remote_port), Style::default()),
     ];
 
     let (status_text, status_style) = match f.status {
@@ -438,19 +437,45 @@ fn render_new_forward_form(f: &mut Frame, app: &AppState, area: Rect) {
 
     for (i, (field, value)) in entries.iter().enumerate() {
         let active = *field == app.input_field;
-        let style = if active {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
+        let label_style = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
         } else {
-            Style::default()
+            mute()
         };
         let cursor = if active { "_" } else { "" };
-        let line = Line::from(vec![
-            Span::styled(format!("{:>12}: ", field.label()), style),
+
+        let mut spans = vec![
+            Span::styled(format!("{:>12}  ", field.label()), label_style),
             Span::raw(format!("{value}{cursor}")),
-        ]);
-        f.render_widget(Paragraph::new(line), fields[i]);
+        ];
+
+        // Show what an empty remote port will become, so the default is
+        // visible rather than a surprise on submit.
+        if *field == InputField::RemotePort
+            && value.is_empty()
+            && !app.input_local_port.trim().is_empty()
+        {
+            spans.push(Span::styled(
+                format!("{}  same as local", app.input_local_port.trim()),
+                mute(),
+            ));
+        }
+        // A blank name gets generated the same way the CLI does it.
+        if *field == InputField::Name
+            && value.is_empty()
+            && !app.input_local_port.trim().is_empty()
+        {
+            spans.push(Span::styled(
+                format!(
+                    "{}-{}",
+                    app.input_host,
+                    app.input_local_port.trim()
+                ),
+                mute(),
+            ));
+        }
+
+        f.render_widget(Paragraph::new(Line::from(spans)), fields[i]);
     }
 
     let hint = if app.input_field == InputField::Name {
@@ -720,6 +745,50 @@ mod tests {
         assert!(!text.contains("idle"), "idle rows should stay quiet:\n{text}");
     }
 
+    /// Foreground colour of the first cell of `needle`, or None if not found.
+    fn fg_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<Color> {
+        let buf = terminal.backend().buffer();
+        let first = needle.chars().next()?;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].symbol().starts_with(first) {
+                    let run: String = (x..buf.area.width.min(x + needle.len() as u16))
+                        .map(|xx| buf[(xx, y)].symbol())
+                        .collect();
+                    if run == needle {
+                        return Some(buf[(x, y)].fg);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn idle_hostnames_stay_readable_rather_than_dimmed() {
+        // Dimming hostnames made a fully-disconnected screen — which is most of
+        // pf's life — unreadable. Hierarchy comes from weight instead.
+        let mut app = app_with(vec![], &["bastion", "nas"]);
+        let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        let fg = fg_of(&terminal, "bastion").expect("idle host not rendered");
+        assert_ne!(fg, MUTE, "idle hostname is dimmed and hard to read");
+    }
+
+    #[test]
+    fn forward_ports_stay_readable() {
+        let mut app = app_with(
+            vec![live("gpu-01", vec![obs("jupyter", 8888, AttachStatus::Forwarded)])],
+            &[],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        let fg = fg_of(&terminal, "localhost:8888").expect("forward not rendered");
+        assert_ne!(fg, MUTE, "the port mapping is the payload; it must not be dim");
+    }
+
     #[test]
     fn a_healthy_machine_does_not_display_a_zero_reconnect_count() {
         let mut app = app_with(vec![live("gpu-01", vec![])], &[]);
@@ -816,6 +885,29 @@ mod tests {
         assert!(text.contains("Esc"), "empty state gives no way out:\n{text}");
     }
 
+    /// The disconnected screen — the state pf spends most of its life in, and
+    /// the one that was unreadable when idle hosts were dimmed.
+    /// `cargo test preview_idle -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn preview_idle() {
+        let mut app = app_with(
+            vec![],
+            &["bastion", "dev-box", "gpu-01", "gpu-02", "lovelace", "nas", "turing"],
+        );
+        app.select(2);
+
+        let mut terminal = Terminal::new(TestBackend::new(76, 11)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        println!();
+        for y in 0..buf.area.height {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            println!("{}", line.trim_end());
+        }
+        println!();
+    }
+
     /// Not an assertion — prints the layout so it can be eyeballed.
     /// `cargo test preview_layout -- --nocapture --ignored`
     #[test]
@@ -870,5 +962,22 @@ mod tests {
         assert!(text.contains("Local Port"), "port field missing:\n{text}");
         // The machine list is the host picker now; the form must not ask again.
         assert!(!text.contains("Host:"), "form still asks for a host:\n{text}");
+    }
+
+    #[test]
+    fn the_form_shows_what_an_empty_remote_port_will_become() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &[]);
+        app.open_new_forward_form("gpu-01".to_string());
+        app.input_local_port = "8888".to_string();
+
+        let text = draw(&mut app, 90, 24);
+        assert!(
+            text.contains("same as local"),
+            "the remote-port default is invisible:\n{text}"
+        );
+        assert!(
+            text.contains("gpu-01-8888"),
+            "the generated name is invisible:\n{text}"
+        );
     }
 }
