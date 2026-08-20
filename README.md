@@ -99,7 +99,8 @@ Keeping the master free of `-L` is what stops one failing bind from tearing down
 Launch with `pf tui` for a tree of your machines, each unfolding to the forwards running on it:
 
 ```
-╭ pf  2 of 6 connected  ·  all hosts ─────────────────────────────────╮
+ pf  ·  all hosts
+╭ sessions · 3 ───────────────────────────────────────────────────────╮
 │   machine                            state        uptime            │
 │ ● ▾ gpu-01 ·2                        connected    2h14m         ↻1  │
 │▌●   ├─ 8888 → localhost:8888         forwarded    2h14m             │
@@ -108,21 +109,27 @@ Launch with `pf tui` for a tree of your machines, each unfolding to the forwards
 │ ●   ├─ 3000 → localhost:3000         forwarded    17m04s            │
 │ ✕   └─ 5432 → localhost:5432         failed       port in use       │
 │ ◐ ▾ turing ·1                        reconnecting              ↻4   │
+╰─────────────────────────────────────────────────────────────────────╯
+╭ hosts · 2 ──────────────────────────────────────────────────────────╮
 │ ○   bastion                                                         │
 │ ○   nas                                                             │
 ╰─────────────────────────────────────────────────────────────────────╯
 ```
 
-Machines with a live session open expanded and sort to the top; everything else sits collapsed below. `·2` is the forward count, `↻4` the reconnect count — shown only once it stops being zero.
+**sessions** holds the machines you have a live connection to, each unfolding to the forwards running on it. **hosts** holds the ones you could connect to but haven't — press `a` on any of them to start a forward and it moves up. Each box scrolls on its own and is sized to what it holds, and a list that is all one kind stays a single box. `·2` is the forward count, `↻4` the reconnect count — shown only once it stops being zero.
 
-Lamps carry state by shape as well as colour, so the tree reads on a monochrome terminal: `●` connected, `◐` connecting or reconnecting, `✕` failed, `○` idle.
+Lamps carry state by shape as well as colour, so the tree reads on a monochrome terminal: `●` connected, `◐` connecting or reconnecting (it turns while it works), `✕` failed, `○` idle. The local port carries the accent — it's the number you type into a browser.
 
 ### Keybindings
+
+Press `?` for the full list without leaving the dashboard; the bar along the bottom carries the essentials.
 
 | Key | Action |
 |-----|--------|
 | `j/k` or arrows | Navigate |
-| `Enter` / `Space` / `→` | Unfold a machine |
+| `g` / `G`, `PgUp` / `PgDn`, `ctrl-d` / `ctrl-u` | Jump, page, half-page |
+| `Tab` / `Enter` / `Space` | Fold or unfold a machine |
+| `→` | Unfold |
 | `←` | Collapse, or jump to the parent machine |
 | `Z` | Collapse all |
 | `a` | Add a forward to the selected machine |
@@ -130,11 +137,16 @@ Lamps carry state by shape as well as colour, so the tree reads on a monochrome 
 | `x` / `d` | Stop — one forward, or all on a machine |
 | `r` | Restart a forward, or reconnect a machine |
 | `l` | Session log |
-| `/` | Filter by machine or forward name |
+| `/` | Filter by machine or forward name — `↑`/`↓` browse the matches |
+| `Esc` | Clear the filter |
 | `m` | Cycle which machines are listed |
 | `s` | Start from a saved profile |
 | `o` | Open the forward in a browser |
+| `y` | Copy the forward's URL |
+| `?` | Every key, in one overlay |
 | `q` | Quit |
+
+Starting, stopping, and restarting run in the background — the dashboard says what's in flight and stays responsive while ssh takes its time. The session log follows its tail like `tail -f`, holding your place as soon as you scroll up.
 
 `a` knows which machine you're on, so it only asks for ports. An empty remote port mirrors the local one, and an empty name is generated — the form shows both before you submit. `A` is the way in for a host that isn't in the list: an IP, a `user@host`, or anything hidden behind a wildcard in `~/.ssh/config`.
 
