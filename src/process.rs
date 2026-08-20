@@ -16,8 +16,22 @@ pub fn kill_process(pid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Is `port` unavailable on **either** loopback address?
+///
+/// ssh's `LocalForward` binds `127.0.0.1` and `::1` as two separate specific
+/// addresses, and `ssh -O forward` exits 0 if it gets *either* one. So a
+/// listener on only `::1` produces a forward that ssh calls a success, `pf list`
+/// calls `running`, and that silently fails for any client whose `localhost`
+/// resolves to `::1`. Checking one family would let exactly that through.
+///
+/// Verified against OpenSSH 9.9 on 2026-08-20: with both loopback addresses
+/// taken, `-O forward` exits 255 with "Port forwarding failed"; with only one
+/// taken, it exits 0 having bound just the other.
 pub fn is_port_in_use(port: u16) -> bool {
-    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+    use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
+
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_err()
+        || TcpListener::bind((Ipv6Addr::LOCALHOST, port)).is_err()
 }
 
 /// Which host owns a given forward name. Names are globally unique, so the
@@ -182,6 +196,31 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         seed(d.path(), "gpu-01", &[("jupyter", 8888)]);
         assert!(check_name_available_in(d.path(), "tensorboard").is_ok());
+    }
+
+    #[test]
+    fn a_port_taken_on_either_loopback_family_counts_as_in_use() {
+        use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
+
+        // Free on both families.
+        let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let free_port = probe.local_addr().unwrap().port();
+        drop(probe);
+        assert!(!is_port_in_use(free_port));
+
+        // Taken on IPv4 only.
+        let v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let v4_port = v4.local_addr().unwrap().port();
+        assert!(is_port_in_use(v4_port), "IPv4-only conflict missed");
+        drop(v4);
+
+        // Taken on IPv6 only. This is the case a 127.0.0.1-only check misses:
+        // ssh would bind IPv4, exit 0, and report a half-working forward as
+        // healthy.
+        let v6 = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+        let v6_port = v6.local_addr().unwrap().port();
+        assert!(is_port_in_use(v6_port), "IPv6-only conflict missed");
+        drop(v6);
     }
 
     #[test]
