@@ -73,7 +73,7 @@ pub fn render(f: &mut Frame, app: &mut AppState) {
 fn render_help_overlay(f: &mut Frame) {
     let pairs: &[(&str, &str)] = &[
         ("j/k ↑/↓", "move"),
-        ("↵/space", "fold"),
+        ("tab ↵ space", "fold"),
         ("g/G", "first/last"),
         ("←/→", "collapse/expand"),
         ("ctrl-d/u", "half page"),
@@ -679,7 +679,7 @@ fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
         Mode::Normal => {
             let mut pairs: Vec<(&'static str, &'static str)> = vec![
                 ("j/k", "move"),
-                ("↵", "fold"),
+                ("tab", "fold"),
                 ("a", "add"),
                 ("x", "stop"),
                 ("l", "logs"),
@@ -920,6 +920,7 @@ mod tests {
         let mut app = app_with(vec![], &["nas"]);
         let text = draw(&mut app, 110, 10);
 
+        assert!(text.contains("tab fold"), "tab not advertised as the fold key:\n{text}");
         assert!(text.contains("? help"), "no way to discover the help overlay:\n{text}");
         // The long tail lives in help now; the bar stays scannable.
         assert!(!text.contains("restart"), "menu still overflowing:\n{text}");

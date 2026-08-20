@@ -158,8 +158,9 @@ fn handle_normal_key(app: &mut AppState, key: KeyEvent) {
         KeyCode::PageDown => app.select_by(app.tree_visible.max(1) as isize),
         KeyCode::PageUp => app.select_by(-(app.tree_visible.max(1) as isize)),
 
-        // Folding
-        KeyCode::Enter | KeyCode::Char(' ') => app.toggle_expand(),
+        // Folding. Tab is the key this is advertised under — one key for one
+        // idea, and it works from a forward row too, closing what you are in.
+        KeyCode::Tab | KeyCode::Enter | KeyCode::Char(' ') => app.toggle_expand(),
         KeyCode::Right => app.expand_selected(),
         KeyCode::Left => app.collapse_selected(),
         KeyCode::Char('Z') => app.collapse_all(),
@@ -567,6 +568,29 @@ mod tests {
         app.rows = tree::flatten(&app.machines, &app.expanded);
         app.select(1); // the forward row
         app
+    }
+
+    #[test]
+    fn tab_folds_and_unfolds_the_machine_under_the_cursor() {
+        let mut app = app_on_a_forward();
+        app.select(0);
+        assert!(app.expanded.contains("gpu-01"), "should start expanded");
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert!(!app.expanded.contains("gpu-01"), "tab should fold");
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert!(app.expanded.contains("gpu-01"), "tab should unfold again");
+    }
+
+    #[test]
+    fn tab_from_a_forward_folds_its_parent() {
+        // Tab is one key for one idea — close what I am inside of.
+        let mut app = app_on_a_forward();
+        app.select(1); // the forward row
+
+        handle_key(&mut app, key(KeyCode::Tab));
+        assert!(!app.expanded.contains("gpu-01"), "tab should fold the parent");
     }
 
     #[test]
