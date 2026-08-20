@@ -4,5 +4,5 @@ pub mod store;
 pub mod types;
 pub mod watcher;
 
-pub use reconcile::{apply, reconcile, Action};
+pub use reconcile::{apply, reconcile};
 pub use types::*;

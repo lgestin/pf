@@ -7,7 +7,6 @@ mod process;
 mod session;
 pub mod ssh_hosts;
 mod state;
-mod tunnel;
 mod tui;
 mod watcher;
 
@@ -312,19 +311,20 @@ fn cmd_config_list() -> Result<()> {
 }
 
 fn cmd_clean() -> Result<()> {
-    let states = ForwardState::list_all()?;
     let mut cleaned = 0;
-    for state in &states {
+
+    for state in session::store::list_states()? {
         if !process::is_alive(state.watcher_pid) {
-            ForwardState::remove(&state.name)?;
-            println!("Cleaned stale state for '{}'", state.name);
+            session::store::remove_session(&state.host)?;
+            println!("Cleaned stale session for '{}'", state.host);
             cleaned += 1;
         }
     }
+
     if cleaned == 0 {
-        println!("No stale state files found.");
+        println!("No stale session files found.");
     } else {
-        println!("Cleaned {cleaned} stale state file(s).");
+        println!("Cleaned {cleaned} stale session file(s).");
     }
     Ok(())
 }
