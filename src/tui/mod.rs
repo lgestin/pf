@@ -217,6 +217,11 @@ fn handle_filter_key(app: &mut AppState, key: KeyCode) {
         KeyCode::Enter => {
             app.mode = Mode::Normal;
         }
+        // The arrows walk the narrowed list without leaving the prompt, so
+        // filter-then-pick is one motion. Letters stay filter text — j/k
+        // included — which is why only the arrow keys carry motion here.
+        KeyCode::Down => app.select_next(),
+        KeyCode::Up => app.select_prev(),
         KeyCode::Backspace => {
             app.filter.pop();
             app.refresh();
@@ -443,6 +448,24 @@ mod tests {
 
         handle_key(&mut app, ctrl('u'));
         assert_eq!(app.selected(), 0, "ctrl-u should move back up");
+    }
+
+    #[test]
+    fn arrows_browse_the_list_while_the_filter_is_open() {
+        // `/` narrows the list as you type; the arrows walk the matches
+        // without leaving the prompt, so filter-then-pick is one motion.
+        let mut app = app_with_hosts(&["gpu-01", "gpu-02", "nas"]);
+        app.mode = Mode::Filter;
+
+        handle_key(&mut app, key(KeyCode::Down));
+        assert_eq!(app.selected(), 1, "Down should move the selection");
+
+        handle_key(&mut app, key(KeyCode::Up));
+        assert_eq!(app.selected(), 0, "Up should move it back");
+
+        // j/k stay literal — they are filter text, not motion.
+        handle_key(&mut app, key(KeyCode::Char('j')));
+        assert_eq!(app.filter, "j", "typed letters must keep filtering");
     }
 
     #[test]

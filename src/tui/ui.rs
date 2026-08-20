@@ -601,7 +601,7 @@ fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
         Mode::Logs => keys(&[("j/k", "scroll"), ("esc", "back"), ("q", "quit")]),
         Mode::NewForward => keys(&[("tab", "field"), ("↵", "next"), ("esc", "cancel")]),
         Mode::ProfilePicker => keys(&[("j/k", "move"), ("↵", "start"), ("esc", "cancel")]),
-        Mode::Filter => keys(&[("↵", "apply"), ("esc", "clear")]),
+        Mode::Filter => keys(&[("↑/↓", "move"), ("↵", "apply"), ("esc", "clear")]),
         Mode::Confirm(_) => keys(&[("y", "confirm"), ("n", "cancel")]),
     };
 
