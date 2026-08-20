@@ -1,4 +1,6 @@
+use crate::session::ssh::SshControl;
 use crate::session::{AttachStatus, DesiredForward, DesiredSession, ForwardObs};
+use chrono::Utc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -41,6 +43,65 @@ pub fn reconcile(desired: &DesiredSession, observed: &[ForwardObs]) -> Vec<Actio
     }
 
     actions
+}
+
+/// Execute `actions` and fold the outcomes into `observed`.
+///
+/// Returns log lines for the caller to write. A failed attach marks only its
+/// own forward; the session and its neighbours are untouched.
+pub fn apply(
+    actions: &[Action],
+    host: &str,
+    ssh: &dyn SshControl,
+    observed: &mut Vec<ForwardObs>,
+) -> Vec<String> {
+    let mut logs = Vec::new();
+
+    for action in actions {
+        match action {
+            Action::Cancel(f) => {
+                match ssh.cancel(host, f) {
+                    Ok(()) => logs.push(format!("cancelled {}:{}", f.local_port, f.remote_port)),
+                    Err(e) => logs.push(format!("cancel of {} failed: {e}", f.local_port)),
+                }
+                // Drop it either way: intent says it should be gone, and a
+                // cancel that failed because it was never attached is fine.
+                observed.retain(|o| o.name != f.name);
+            }
+            Action::Attach(f) => {
+                let (status, attached_at, error) = match ssh.forward(host, f) {
+                    Ok(()) => {
+                        logs.push(format!(
+                            "attached {} -> {}:{}",
+                            f.local_port, f.remote_host, f.remote_port
+                        ));
+                        (AttachStatus::Attached, Some(Utc::now()), None)
+                    }
+                    Err(e) => {
+                        logs.push(format!("attach of {} failed: {e}", f.local_port));
+                        (AttachStatus::Failed, None, Some(e))
+                    }
+                };
+
+                let obs = ForwardObs {
+                    name: f.name.clone(),
+                    local_port: f.local_port,
+                    remote_host: f.remote_host.clone(),
+                    remote_port: f.remote_port,
+                    status,
+                    attached_at,
+                    error,
+                };
+
+                match observed.iter_mut().find(|o| o.name == f.name) {
+                    Some(slot) => *slot = obs,
+                    None => observed.push(obs),
+                }
+            }
+        }
+    }
+
+    logs
 }
 
 #[cfg(test)]
@@ -170,5 +231,95 @@ mod tests {
         let actions = reconcile(&desired(&[]), &observed(&[("a", 1, AttachStatus::Failed)]));
         assert_eq!(actions.len(), 1);
         assert!(matches!(&actions[0], Action::Cancel(_)));
+    }
+
+    use crate::session::ssh::{FakeSsh, SshControl};
+
+    #[test]
+    fn applying_an_attach_records_it_as_attached() {
+        let ssh = FakeSsh::new();
+        ssh.connected.set(true);
+        let d = desired(&[("a", 1)]);
+        let mut obs: Vec<ForwardObs> = Vec::new();
+
+        let actions = reconcile(&d, &obs);
+        let logs = apply(&actions, "gpu-01", &ssh, &mut obs);
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].name, "a");
+        assert_eq!(obs[0].status, AttachStatus::Attached);
+        assert!(obs[0].attached_at.is_some());
+        assert!(obs[0].error.is_none());
+        assert_eq!(logs.len(), 1);
+        assert!(logs[0].contains("attached"), "unexpected log: {:?}", logs[0]);
+    }
+
+    #[test]
+    fn a_failed_attach_is_recorded_without_poisoning_its_neighbours() {
+        let ssh = FakeSsh::new();
+        ssh.connected.set(true);
+        ssh.fail_ports.borrow_mut().insert(2);
+
+        let d = desired(&[("a", 1), ("b", 2)]);
+        let mut obs: Vec<ForwardObs> = Vec::new();
+        apply(&reconcile(&d, &obs), "gpu-01", &ssh, &mut obs);
+
+        let a = obs.iter().find(|f| f.name == "a").unwrap();
+        let b = obs.iter().find(|f| f.name == "b").unwrap();
+        assert_eq!(a.status, AttachStatus::Attached, "healthy forward was affected");
+        assert_eq!(b.status, AttachStatus::Failed);
+        assert!(b.error.as_ref().unwrap().contains("Address already in use"));
+    }
+
+    #[test]
+    fn a_failed_attach_is_not_retried_on_the_next_pass() {
+        let ssh = FakeSsh::new();
+        ssh.connected.set(true);
+        ssh.fail_ports.borrow_mut().insert(1);
+
+        let d = desired(&[("a", 1)]);
+        let mut obs: Vec<ForwardObs> = Vec::new();
+        apply(&reconcile(&d, &obs), "gpu-01", &ssh, &mut obs);
+        let after_first = ssh.calls.borrow().len();
+
+        apply(&reconcile(&d, &obs), "gpu-01", &ssh, &mut obs);
+        assert_eq!(
+            ssh.calls.borrow().len(),
+            after_first,
+            "a permanently failing forward was retried: {:?}",
+            ssh.calls.borrow()
+        );
+    }
+
+    #[test]
+    fn applying_a_cancel_drops_the_forward_from_observed() {
+        let ssh = FakeSsh::new();
+        ssh.connected.set(true);
+
+        let mut obs = attached(&[("a", 1), ("b", 2)]);
+        let d = desired(&[("a", 1)]);
+        apply(&reconcile(&d, &obs), "gpu-01", &ssh, &mut obs);
+
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].name, "a");
+        assert!(ssh.calls.borrow().iter().any(|c| c == "cancel 2:localhost:2"));
+    }
+
+    #[test]
+    fn a_reconnect_reattaches_everything_through_the_same_path() {
+        let ssh = FakeSsh::new();
+        ssh.connected.set(true);
+        let d = desired(&[("a", 1), ("b", 2)]);
+
+        let mut obs: Vec<ForwardObs> = Vec::new();
+        apply(&reconcile(&d, &obs), "gpu-01", &ssh, &mut obs);
+        assert_eq!(obs.len(), 2);
+
+        // Master died: observed resets. No separate recovery code path.
+        obs.clear();
+        apply(&reconcile(&d, &obs), "gpu-01", &ssh, &mut obs);
+
+        assert_eq!(obs.len(), 2);
+        assert!(obs.iter().all(|f| f.status == AttachStatus::Attached));
     }
 }
