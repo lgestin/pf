@@ -61,6 +61,11 @@ pub enum SessionStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AttachStatus {
+    /// `attached` is what this was called before it was renamed. Without the
+    /// alias, a state file written by the older binary fails to parse — and
+    /// since `list_states_in` skips what it cannot read, a live forward simply
+    /// disappears from `pf list` while its tunnel is still up.
+    #[serde(alias = "attached")]
     Forwarded,
     Pending,
     Failed,
@@ -168,6 +173,33 @@ mod tests {
             back.forwards[0].error.as_deref(),
             Some("bind: Address already in use")
         );
+    }
+
+    #[test]
+    fn a_state_file_from_before_the_rename_still_loads() {
+        // A running forward whose state file says "attached" must not vanish
+        // from `pf list` just because the variant was renamed. Skipping
+        // unreadable files means a parse failure hides live state silently.
+        let raw = r#"{
+            "host": "lovelace", "watcher_pid": 1, "master_pid": 2,
+            "status": "connected", "started_at": "2026-08-20T12:03:09Z",
+            "connected_at": "2026-08-20T12:03:09Z", "reconnect_count": 0,
+            "auto_reconnect": true,
+            "retry": {"max_retries": 0, "initial_delay": 5, "max_delay": 300},
+            "forwards": [{
+                "name": "lovelace-2718", "local_port": 2718,
+                "remote_host": "localhost", "remote_port": 2718,
+                "status": "attached", "attached_at": null, "error": null
+            }]
+        }"#;
+
+        let state: SessionState = serde_json::from_str(raw).expect("old state file must load");
+        assert_eq!(state.forwards[0].status, AttachStatus::Forwarded);
+
+        // New writes use the new spelling.
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"forwarded\""), "should write the new name: {json}");
+        assert!(!json.contains("\"attached\""), "should not write the old name: {json}");
     }
 
     #[test]
