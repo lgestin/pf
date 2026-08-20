@@ -397,8 +397,10 @@ fn render_empty_state(f: &mut Frame, app: &AppState, block: Block<'static>, area
     );
 }
 
-fn render_log_panel(f: &mut Frame, app: &AppState, area: Rect) {
+fn render_log_panel(f: &mut Frame, app: &mut AppState, area: Rect) {
     let visible_lines = area.height.saturating_sub(2) as usize;
+    // Remembered so paging and tail-following know the viewport's real size.
+    app.log_visible = visible_lines;
     let end = (app.log_scroll + visible_lines).min(app.log_lines.len());
     let start = app.log_scroll.min(end);
 
@@ -598,7 +600,12 @@ fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
             ("s", "profile"),
             ("q", "quit"),
         ]),
-        Mode::Logs => keys(&[("j/k", "scroll"), ("esc", "back"), ("q", "quit")]),
+        Mode::Logs => keys(&[
+            ("j/k", "scroll"),
+            ("g/G", "top/tail"),
+            ("esc", "back"),
+            ("q", "quit"),
+        ]),
         Mode::NewForward => keys(&[("tab", "field"), ("↵", "next"), ("esc", "cancel")]),
         Mode::ProfilePicker => keys(&[("j/k", "move"), ("↵", "start"), ("esc", "cancel")]),
         Mode::Filter => keys(&[("↑/↓", "move"), ("↵", "apply"), ("esc", "clear")]),

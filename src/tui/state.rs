@@ -70,6 +70,10 @@ pub struct AppState {
     pub log_lines: Vec<String>,
     pub log_scroll: usize,
     pub log_name: String,
+    /// Pinned to the tail, `tail -f` style, until the user scrolls up.
+    pub log_follow: bool,
+    /// Lines the log viewport held at the last render.
+    pub log_visible: usize,
 
     // New forward form
     pub input_field: InputField,
@@ -109,6 +113,8 @@ impl AppState {
             log_lines: Vec::new(),
             log_scroll: 0,
             log_name: String::new(),
+            log_follow: true,
+            log_visible: 20,
             input_field: InputField::LocalPort,
             input_host: String::new(),
             input_asks_host: false,
@@ -381,17 +387,62 @@ impl AppState {
         }
     }
 
+    /// The furthest the log can scroll: tail line at the bottom of the view.
+    fn log_max_scroll(&self) -> usize {
+        self.log_lines.len().saturating_sub(self.log_visible)
+    }
+
+    /// Replace the log content, `tail -f` style: pinned to the tail while
+    /// following, and holding the reader's place once they have scrolled up —
+    /// the tick reload must never steal the position.
+    pub fn set_log_lines(&mut self, lines: Vec<String>) {
+        self.log_lines = lines;
+        if self.log_follow {
+            self.log_scroll = self.log_max_scroll();
+        } else {
+            self.log_scroll = self.log_scroll.min(self.log_max_scroll());
+        }
+    }
+
+    /// Scrolling up is what breaks tail-following.
+    pub fn log_scroll_up(&mut self, n: usize) {
+        self.log_follow = false;
+        self.log_scroll = self.log_scroll.saturating_sub(n);
+    }
+
+    /// Reaching the bottom resumes it.
+    pub fn log_scroll_down(&mut self, n: usize) {
+        self.log_scroll = (self.log_scroll + n).min(self.log_max_scroll());
+        if self.log_scroll == self.log_max_scroll() {
+            self.log_follow = true;
+        }
+    }
+
+    pub fn log_to_top(&mut self) {
+        self.log_follow = false;
+        self.log_scroll = 0;
+    }
+
+    pub fn log_to_bottom(&mut self) {
+        self.log_follow = true;
+        self.log_scroll = self.log_max_scroll();
+    }
+
+    /// `l` — enter the log viewer at the tail.
+    pub fn open_logs(&mut self, host: &str) {
+        self.log_follow = true;
+        self.load_logs(host);
+        self.mode = Mode::Logs;
+    }
+
     pub fn load_logs(&mut self, host: &str) {
         self.log_name = host.to_string();
-        self.log_lines.clear();
-        self.log_scroll = 0;
+        let mut lines = Vec::new();
         if let Ok(path) = crate::paths::session_log_file(&crate::paths::sanitize_host(host)) {
             if let Ok(content) = std::fs::read_to_string(path) {
-                self.log_lines = content.lines().map(|l| l.to_string()).collect();
-                if self.log_lines.len() > 20 {
-                    self.log_scroll = self.log_lines.len().saturating_sub(20);
-                }
+                lines = content.lines().map(|l| l.to_string()).collect();
             }
         }
+        self.set_log_lines(lines);
     }
 }

@@ -172,8 +172,7 @@ fn handle_normal_key(app: &mut AppState, key: KeyEvent) {
         KeyCode::Char('l') => {
             if let Some(sel) = app.selected_sel() {
                 let host = sel.host().to_string();
-                app.load_logs(&host);
-                app.mode = Mode::Logs;
+                app.open_logs(&host);
             }
         }
 
@@ -238,12 +237,12 @@ fn handle_logs_key(app: &mut AppState, key: KeyCode) {
     match key {
         KeyCode::Esc => app.mode = Mode::Normal,
         KeyCode::Char('q') => app.should_quit = true,
-        KeyCode::Char('j') | KeyCode::Down => {
-            app.log_scroll = (app.log_scroll + 1).min(app.log_lines.len().saturating_sub(1));
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.log_scroll = app.log_scroll.saturating_sub(1);
-        }
+        KeyCode::Char('j') | KeyCode::Down => app.log_scroll_down(1),
+        KeyCode::Char('k') | KeyCode::Up => app.log_scroll_up(1),
+        KeyCode::PageDown => app.log_scroll_down(app.log_visible.max(1)),
+        KeyCode::PageUp => app.log_scroll_up(app.log_visible.max(1)),
+        KeyCode::Char('g') | KeyCode::Home => app.log_to_top(),
+        KeyCode::Char('G') | KeyCode::End => app.log_to_bottom(),
         _ => {}
     }
 }
@@ -448,6 +447,78 @@ mod tests {
 
         handle_key(&mut app, ctrl('u'));
         assert_eq!(app.selected(), 0, "ctrl-u should move back up");
+    }
+
+    fn numbered_lines(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("line {i}")).collect()
+    }
+
+    /// An app sitting in the log viewer with `lines` loaded and a viewport
+    /// `visible` rows tall.
+    fn log_app(lines: usize, visible: usize) -> AppState {
+        let mut app = app_with_hosts(&["gpu-01"]);
+        app.mode = Mode::Logs;
+        app.log_visible = visible;
+        app.set_log_lines(numbered_lines(lines));
+        app
+    }
+
+    #[test]
+    fn logs_follow_the_tail_until_you_scroll_up() {
+        let mut app = log_app(100, 10);
+        assert_eq!(app.log_scroll, 90, "opening the log should show the tail");
+
+        // The 1s tick reloads the file; new lines keep the tail in view.
+        app.set_log_lines(numbered_lines(105));
+        assert_eq!(app.log_scroll, 95, "a growing log should stay pinned to the tail");
+    }
+
+    #[test]
+    fn reloading_logs_keeps_your_place_once_you_scroll_up() {
+        let mut app = log_app(100, 10);
+
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        assert_eq!(app.log_scroll, 89, "k should scroll up one line");
+
+        // You are reading an old error; the tick reload must not yank you
+        // back to the bottom.
+        app.set_log_lines(numbered_lines(105));
+        assert_eq!(app.log_scroll, 89, "a reload stole the scroll position");
+    }
+
+    #[test]
+    fn scrolling_back_to_the_bottom_resumes_following() {
+        let mut app = log_app(100, 10);
+
+        handle_key(&mut app, key(KeyCode::Char('k')));
+        handle_key(&mut app, key(KeyCode::Char('j')));
+
+        app.set_log_lines(numbered_lines(105));
+        assert_eq!(app.log_scroll, 95, "returning to the tail should resume following");
+    }
+
+    #[test]
+    fn g_and_shift_g_jump_within_the_log() {
+        let mut app = log_app(100, 10);
+
+        handle_key(&mut app, key(KeyCode::Char('g')));
+        assert_eq!(app.log_scroll, 0, "g should jump to the top");
+        app.set_log_lines(numbered_lines(105));
+        assert_eq!(app.log_scroll, 0, "reading the top must survive a reload");
+
+        handle_key(&mut app, key(KeyCode::Char('G')));
+        assert_eq!(app.log_scroll, 95, "G should jump back to the tail");
+    }
+
+    #[test]
+    fn page_keys_page_through_the_log() {
+        let mut app = log_app(100, 10);
+
+        handle_key(&mut app, key(KeyCode::PageUp));
+        assert_eq!(app.log_scroll, 80, "PageUp should move a viewport up");
+
+        handle_key(&mut app, key(KeyCode::PageDown));
+        assert_eq!(app.log_scroll, 90, "PageDown should move a viewport down");
     }
 
     #[test]
