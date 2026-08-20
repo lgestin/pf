@@ -99,6 +99,13 @@ fn handle_normal_key(app: &mut AppState, key: KeyCode) {
             app.filter.clear();
             app.mode = Mode::Filter;
         }
+        // The filter survives leaving Filter mode; Esc is the way back out.
+        KeyCode::Esc => {
+            if !app.filter.is_empty() {
+                app.filter.clear();
+                app.refresh();
+            }
+        }
         KeyCode::Char('m') => app.cycle_machine_source(),
 
         // Add a forward under the selected machine. The host is already known,
@@ -339,5 +346,43 @@ fn handle_confirm_key(app: &mut AppState, key: KeyCode) {
             app.mode = Mode::Normal;
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use tree::MachineListMode;
+
+    /// A tree of idle hosts, bypassing `refresh()` so nothing on-disk leaks in.
+    fn app_with_hosts(hosts: &[&str]) -> AppState {
+        let mut app = AppState::new();
+        app.ssh_hosts = hosts.iter().map(|h| h.to_string()).collect();
+        app.machine_source = MachineListMode::AllHosts;
+        app.machines = tree::build_machines(
+            Vec::new(),
+            &BTreeSet::new(),
+            &app.ssh_hosts,
+            MachineListMode::AllHosts,
+            "",
+        );
+        app.rows = tree::flatten(&app.machines, &app.expanded);
+        app.table_state.select(Some(0));
+        app
+    }
+
+    #[test]
+    fn esc_in_normal_mode_clears_an_applied_filter() {
+        // The empty state promises "Esc clears the filter" — that has to hold
+        // after Enter applied it and returned to Normal mode, not only while
+        // still typing in the filter prompt.
+        let mut app = app_with_hosts(&["gpu-01", "nas"]);
+        app.filter = "gpu".to_string();
+
+        handle_key(&mut app, KeyCode::Esc);
+
+        assert!(app.filter.is_empty(), "Esc should clear the applied filter");
+        assert_eq!(app.mode, Mode::Normal);
     }
 }
