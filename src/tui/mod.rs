@@ -109,6 +109,10 @@ fn handle_normal_key(app: &mut AppState, key: KeyCode) {
             }
         }
 
+        // Connect to a machine the list does not contain — an IP, a user@host,
+        // or anything hidden behind a wildcard in ~/.ssh/config.
+        KeyCode::Char('A') | KeyCode::Char('N') => app.open_new_machine_form(),
+
         KeyCode::Char('x') | KeyCode::Char('d') => match app.selected_sel() {
             Some(Sel::Forward(_, name)) => {
                 app.mode = Mode::Confirm(ConfirmAction::StopForward(name));
@@ -219,8 +223,8 @@ fn handle_logs_key(app: &mut AppState, key: KeyCode) {
 fn handle_new_forward_key(app: &mut AppState, key: KeyCode) {
     match key {
         KeyCode::Esc => app.mode = Mode::Normal,
-        KeyCode::Tab => app.input_field = app.input_field.next(),
-        KeyCode::BackTab => app.input_field = app.input_field.prev(),
+        KeyCode::Tab => app.next_field(),
+        KeyCode::BackTab => app.prev_field(),
         KeyCode::Backspace => {
             app.current_input().pop();
         }
@@ -228,8 +232,8 @@ fn handle_new_forward_key(app: &mut AppState, key: KeyCode) {
             app.current_input().push(c);
         }
         KeyCode::Enter => {
-            if app.input_field != state::InputField::Name {
-                app.input_field = app.input_field.next();
+            if !app.on_last_field() {
+                app.next_field();
                 return;
             }
             submit_new_forward(app);
@@ -239,7 +243,13 @@ fn handle_new_forward_key(app: &mut AppState, key: KeyCode) {
 }
 
 fn submit_new_forward(app: &mut AppState) {
-    let host = app.input_host.clone();
+    let host = app.input_host.trim().to_string();
+    if host.is_empty() {
+        app.status_message = Some("Host is required".to_string());
+        app.input_field = state::InputField::Host;
+        return;
+    }
+
     let local: u16 = match app.input_local_port.trim().parse() {
         Ok(p) => p,
         Err(_) => {

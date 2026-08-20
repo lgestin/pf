@@ -23,34 +23,21 @@ pub enum ConfirmAction {
     RestartHost(String),
 }
 
-/// The new-forward form no longer asks for a host: `a` is pressed on a machine
-/// row, so the host is already known.
+/// `a` on a machine row already knows the host, so the form skips that field.
+/// `A` connects to a machine that is not listed, and then it is the only field
+/// that matters — hence a form that can include it or not.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputField {
+    Host,
     LocalPort,
     RemotePort,
     Name,
 }
 
 impl InputField {
-    pub fn next(&self) -> Self {
-        match self {
-            InputField::LocalPort => InputField::RemotePort,
-            InputField::RemotePort => InputField::Name,
-            InputField::Name => InputField::LocalPort,
-        }
-    }
-
-    pub fn prev(&self) -> Self {
-        match self {
-            InputField::LocalPort => InputField::Name,
-            InputField::RemotePort => InputField::LocalPort,
-            InputField::Name => InputField::RemotePort,
-        }
-    }
-
     pub fn label(&self) -> &str {
         match self {
+            InputField::Host => "Host",
             InputField::LocalPort => "Local Port",
             InputField::RemotePort => "Remote Port",
             InputField::Name => "Name",
@@ -84,8 +71,10 @@ pub struct AppState {
 
     // New forward form
     pub input_field: InputField,
-    /// The machine `a` was pressed on.
+    /// The machine `a` was pressed on, or free text when `A` asked for one.
     pub input_host: String,
+    /// Whether the form includes the Host field at all.
+    pub input_asks_host: bool,
     pub input_local_port: String,
     pub input_remote_port: String,
     pub input_name: String,
@@ -119,6 +108,7 @@ impl AppState {
             log_name: String::new(),
             input_field: InputField::LocalPort,
             input_host: String::new(),
+            input_asks_host: false,
             input_local_port: String::new(),
             input_remote_port: String::new(),
             input_name: String::new(),
@@ -300,17 +290,65 @@ impl AppState {
         self.rebuild_rows();
     }
 
-    pub fn open_new_forward_form(&mut self, host: String) {
-        self.input_host = host;
+    fn clear_form(&mut self) {
         self.input_local_port.clear();
         self.input_remote_port.clear();
         self.input_name.clear();
-        self.input_field = InputField::LocalPort;
         self.mode = Mode::NewForward;
+    }
+
+    /// `a` — add a forward to the machine under the cursor.
+    pub fn open_new_forward_form(&mut self, host: String) {
+        self.input_host = host;
+        self.input_asks_host = false;
+        self.input_field = InputField::LocalPort;
+        self.clear_form();
+    }
+
+    /// `A` — connect to a machine that is not in the list. Free text, because
+    /// the whole point is that this host is outside the set we could complete
+    /// against.
+    pub fn open_new_machine_form(&mut self) {
+        self.input_host.clear();
+        self.input_asks_host = true;
+        self.input_field = InputField::Host;
+        self.clear_form();
+    }
+
+    /// The fields this form actually shows, in tab order.
+    pub fn form_fields(&self) -> Vec<InputField> {
+        let mut fields = Vec::new();
+        if self.input_asks_host {
+            fields.push(InputField::Host);
+        }
+        fields.extend([
+            InputField::LocalPort,
+            InputField::RemotePort,
+            InputField::Name,
+        ]);
+        fields
+    }
+
+    pub fn next_field(&mut self) {
+        let fields = self.form_fields();
+        let i = fields.iter().position(|f| *f == self.input_field).unwrap_or(0);
+        self.input_field = fields[(i + 1) % fields.len()].clone();
+    }
+
+    pub fn prev_field(&mut self) {
+        let fields = self.form_fields();
+        let i = fields.iter().position(|f| *f == self.input_field).unwrap_or(0);
+        self.input_field = fields[(i + fields.len() - 1) % fields.len()].clone();
+    }
+
+    /// True when the cursor is on the last field, so Enter submits.
+    pub fn on_last_field(&self) -> bool {
+        self.form_fields().last() == Some(&self.input_field)
     }
 
     pub fn current_input(&mut self) -> &mut String {
         match self.input_field {
+            InputField::Host => &mut self.input_host,
             InputField::LocalPort => &mut self.input_local_port,
             InputField::RemotePort => &mut self.input_remote_port,
             InputField::Name => &mut self.input_name,

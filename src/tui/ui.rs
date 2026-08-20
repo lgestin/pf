@@ -90,15 +90,29 @@ fn machine_state(machine: &MachineRow) -> Option<SessionStatus> {
     Some(session.status)
 }
 
+/// Lamp, word, and colour for a machine — one source of truth, so the glyph and
+/// the label can never drift apart.
+fn machine_look(state: Option<SessionStatus>) -> (&'static str, &'static str, Color) {
+    match state {
+        Some(SessionStatus::Connected) => ("●", "connected", OK),
+        Some(SessionStatus::Connecting) => ("◐", "connecting", WARN),
+        Some(SessionStatus::Reconnecting) => ("◐", "reconnecting", WARN),
+        Some(SessionStatus::Failed) => ("✕", "failed", BAD),
+        None => ("○", "", MUTE),
+    }
+}
+
+fn forward_look(status: AttachStatus) -> (&'static str, &'static str, Color) {
+    match status {
+        AttachStatus::Forwarded => ("●", "forwarded", OK),
+        AttachStatus::Pending => ("◐", "pending", WARN),
+        AttachStatus::Failed => ("✕", "failed", BAD),
+    }
+}
+
 fn machine_row(machine: &MachineRow, expanded: bool) -> TRow<'static> {
     let state = machine_state(machine);
-
-    let (lamp_sym, lamp_color) = match state {
-        Some(SessionStatus::Connected) => ("●", OK),
-        Some(SessionStatus::Connecting) | Some(SessionStatus::Reconnecting) => ("◐", WARN),
-        Some(SessionStatus::Failed) => ("✕", BAD),
-        None => ("○", MUTE),
-    };
+    let (lamp_sym, status_text, lamp_color) = machine_look(state);
 
     let marker = if machine.forwards.is_empty() {
         " "
@@ -131,14 +145,6 @@ fn machine_row(machine: &MachineRow, expanded: bool) -> TRow<'static> {
         ));
     }
 
-    let (status_text, status_style) = match state {
-        Some(SessionStatus::Connected) => ("connected", mute()),
-        Some(SessionStatus::Connecting) => ("connecting", Style::default().fg(WARN)),
-        Some(SessionStatus::Reconnecting) => ("reconnecting", Style::default().fg(WARN)),
-        Some(SessionStatus::Failed) => ("failed", Style::default().fg(BAD)),
-        None => ("", mute()),
-    };
-
     // A reconnect count of zero is the normal case and says nothing. Render it
     // only once it becomes a signal.
     let reconnects = match machine.session.as_ref() {
@@ -152,7 +158,9 @@ fn machine_row(machine: &MachineRow, expanded: bool) -> TRow<'static> {
     TRow::new(vec![
         lamp(lamp_sym, lamp_color),
         Cell::from(Line::from(label)),
-        Cell::from(Span::styled(status_text, status_style)),
+        // The word carries the same colour as its lamp, so the state reads
+        // whether the eye lands on the glyph or the label.
+        Cell::from(Span::styled(status_text, Style::default().fg(lamp_color))),
         Cell::from(Span::styled(session_uptime(machine), mute())),
         Cell::from(reconnects),
     ])
@@ -162,11 +170,7 @@ fn forward_row(machine: &MachineRow, fi: usize) -> TRow<'static> {
     let f = &machine.forwards[fi];
     let last = fi + 1 == machine.forwards.len();
 
-    let (lamp_sym, lamp_color) = match f.status {
-        AttachStatus::Forwarded => ("●", OK),
-        AttachStatus::Pending => ("◐", WARN),
-        AttachStatus::Failed => ("✕", BAD),
-    };
+    let (lamp_sym, status_text, lamp_color) = forward_look(f.status);
 
     // Guides make the parent-child relation visible rather than implied by
     // whitespace, which matters once several machines are expanded at once.
@@ -187,12 +191,6 @@ fn forward_row(machine: &MachineRow, fi: usize) -> TRow<'static> {
         Span::styled(format!("{}:{}", f.remote_host, f.remote_port), Style::default()),
     ];
 
-    let (status_text, status_style) = match f.status {
-        AttachStatus::Forwarded => ("forwarded", mute()),
-        AttachStatus::Pending => ("pending", Style::default().fg(WARN)),
-        AttachStatus::Failed => ("failed", Style::default().fg(BAD)),
-    };
-
     // A failed forward has an error worth reading; it takes the uptime slot,
     // which would only have shown "-" anyway.
     let detail = if f.status == AttachStatus::Failed {
@@ -211,7 +209,7 @@ fn forward_row(machine: &MachineRow, fi: usize) -> TRow<'static> {
     TRow::new(vec![
         lamp(lamp_sym, lamp_color),
         Cell::from(Line::from(label)),
-        Cell::from(Span::styled(status_text, status_style)),
+        Cell::from(Span::styled(status_text, Style::default().fg(lamp_color))),
         Cell::from(detail),
         Cell::from(""),
     ])
@@ -418,28 +416,42 @@ fn render_log_panel(f: &mut Frame, app: &AppState, area: Rect) {
 }
 
 fn render_new_forward_form(f: &mut Frame, app: &AppState, area: Rect) {
+    let title = if app.input_asks_host {
+        " Connect to a machine ".to_string()
+    } else {
+        format!(" New forward on {} ", app.input_host)
+    };
+
     let block = Block::default()
-        .title(format!(" New forward on {} ", app.input_host))
-        .borders(Borders::ALL);
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(mute());
     let inner = block.inner(area);
     f.render_widget(block, area);
 
+    let form = app.form_fields();
+    let mut constraints: Vec<Constraint> = form.iter().map(|_| Constraint::Length(1)).collect();
+    constraints.push(Constraint::Length(1)); // hint
+    constraints.push(Constraint::Min(0));
+
     let fields = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
+        .constraints(constraints)
         .split(inner);
 
-    let entries = [
-        (InputField::LocalPort, &app.input_local_port),
-        (InputField::RemotePort, &app.input_remote_port),
-        (InputField::Name, &app.input_name),
-    ];
+    let entries: Vec<(InputField, &String)> = form
+        .iter()
+        .map(|field| {
+            let value = match field {
+                InputField::Host => &app.input_host,
+                InputField::LocalPort => &app.input_local_port,
+                InputField::RemotePort => &app.input_remote_port,
+                InputField::Name => &app.input_name,
+            };
+            (field.clone(), value)
+        })
+        .collect();
 
     for (i, (field, value)) in entries.iter().enumerate() {
         let active = *field == app.input_field;
@@ -470,13 +482,23 @@ fn render_new_forward_form(f: &mut Frame, app: &AppState, area: Rect) {
         if *field == InputField::Name
             && value.is_empty()
             && !app.input_local_port.trim().is_empty()
+            && !app.input_host.trim().is_empty()
         {
             spans.push(Span::styled(
                 format!(
                     "{}-{}",
-                    app.input_host,
+                    app.input_host.trim(),
                     app.input_local_port.trim()
                 ),
+                mute(),
+            ));
+        }
+
+        // The host is free text on purpose: if it were in ~/.ssh/config it
+        // would already be a row in the tree.
+        if *field == InputField::Host && value.is_empty() {
+            spans.push(Span::styled(
+                "hostname, IP, or user@host".to_string(),
                 mute(),
             ));
         }
@@ -484,17 +506,14 @@ fn render_new_forward_form(f: &mut Frame, app: &AppState, area: Rect) {
         f.render_widget(Paragraph::new(Line::from(spans)), fields[i]);
     }
 
-    let hint = if app.input_field == InputField::Name {
-        "  Tab: next field | Enter: submit | Esc: cancel"
+    let hint = if app.on_last_field() {
+        "tab field   ↵ start   esc cancel"
     } else {
-        "  Tab: next field | Enter: next field | Esc: cancel"
+        "tab field   ↵ next   esc cancel"
     };
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            hint,
-            Style::default().fg(Color::DarkGray),
-        ))),
-        fields[3],
+        Paragraph::new(Line::from(Span::styled(format!("  {hint}"), mute()))),
+        fields[entries.len()],
     );
 }
 
@@ -575,6 +594,7 @@ fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
             ("j/k", "move"),
             ("↵", "fold"),
             ("a", "add"),
+            ("A", "new host"),
             ("x", "stop"),
             ("r", "restart"),
             ("l", "logs"),
@@ -757,9 +777,15 @@ mod tests {
 
     /// Foreground colour of the first cell of `needle`, or None if not found.
     fn fg_of(terminal: &Terminal<TestBackend>, needle: &str) -> Option<Color> {
+        fg_of_from(terminal, needle, 0)
+    }
+
+    /// As `fg_of`, but skipping the first `min_y` rows — the title and header
+    /// repeat words like "connected", and they are chrome, not data.
+    fn fg_of_from(terminal: &Terminal<TestBackend>, needle: &str, min_y: u16) -> Option<Color> {
         let buf = terminal.backend().buffer();
         let first = needle.chars().next()?;
-        for y in 0..buf.area.height {
+        for y in min_y..buf.area.height {
             for x in 0..buf.area.width {
                 if buf[(x, y)].symbol().starts_with(first) {
                     let run: String = (x..buf.area.width.min(x + needle.len() as u16))
@@ -816,6 +842,55 @@ mod tests {
                     cell.symbol()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn state_words_carry_the_colour_of_their_lamp() {
+        let mut f = obs("boom", 5432, AttachStatus::Failed);
+        f.attached_at = None;
+        f.error = Some("bind: Address already in use".to_string());
+
+        let mut turing = live("turing", vec![obs("web", 8080, AttachStatus::Pending)]);
+        turing.status = SessionStatus::Reconnecting;
+
+        let mut app = app_with(
+            vec![
+                live("gpu-01", vec![obs("a", 8888, AttachStatus::Forwarded), f]),
+                turing,
+            ],
+            &[],
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+        terminal.draw(|fr| render(fr, &mut app)).unwrap();
+
+        // Row 0 is the title, row 1 the header — both say "connected".
+        assert_eq!(fg_of_from(&terminal, "connected", 2), Some(OK));
+        assert_eq!(fg_of_from(&terminal, "forwarded", 2), Some(OK));
+        assert_eq!(fg_of_from(&terminal, "reconnecting", 2), Some(WARN));
+        assert_eq!(fg_of_from(&terminal, "pending", 2), Some(WARN));
+        assert_eq!(fg_of_from(&terminal, "failed", 2), Some(BAD));
+    }
+
+    #[test]
+    fn a_lamp_and_its_word_can_never_disagree() {
+        // Both come from one lookup, so a future edit cannot colour the glyph
+        // green while the label says failed.
+        for state in [
+            Some(SessionStatus::Connected),
+            Some(SessionStatus::Connecting),
+            Some(SessionStatus::Reconnecting),
+            Some(SessionStatus::Failed),
+            None,
+        ] {
+            let (sym, word, color) = machine_look(state);
+            assert!(!sym.is_empty(), "every state needs a lamp");
+            if state.is_none() {
+                assert!(word.is_empty(), "idle stays quiet");
+            } else {
+                assert!(!word.is_empty(), "{state:?} needs a word");
+            }
+            let _ = color;
         }
     }
 
@@ -1017,6 +1092,52 @@ mod tests {
         assert!(text.contains("Local Port"), "port field missing:\n{text}");
         // The machine list is the host picker now; the form must not ask again.
         assert!(!text.contains("Host:"), "form still asks for a host:\n{text}");
+    }
+
+    #[test]
+    fn the_new_host_form_asks_for_a_host_in_free_text() {
+        // The machine list cannot be the host picker for a host that is not in
+        // it — an IP, a user@host, or anything behind a wildcard in ssh config.
+        let mut app = app_with(vec![], &["nas"]);
+        app.open_new_machine_form();
+
+        let text = draw(&mut app, 90, 24);
+        assert!(text.contains("Connect to a machine"), "wrong title:\n{text}");
+        assert!(text.contains("Host"), "host field missing:\n{text}");
+        assert!(
+            text.contains("user@host"),
+            "no hint that free text is expected:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_host_field_only_exists_in_the_new_host_form() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &[]);
+
+        app.open_new_machine_form();
+        assert_eq!(app.form_fields().len(), 4, "new-host form should ask for a host");
+        assert_eq!(app.input_field, InputField::Host, "should start on the host");
+
+        app.open_new_forward_form("gpu-01".to_string());
+        assert_eq!(app.form_fields().len(), 3, "adding to a known machine should not");
+        assert_eq!(app.input_field, InputField::LocalPort);
+    }
+
+    #[test]
+    fn tabbing_wraps_within_whichever_fields_the_form_has() {
+        let mut app = app_with(vec![live("gpu-01", vec![])], &[]);
+
+        app.open_new_forward_form("gpu-01".to_string());
+        app.next_field();
+        app.next_field();
+        assert_eq!(app.input_field, InputField::Name);
+        assert!(app.on_last_field(), "Name is last when there is no host field");
+        app.next_field();
+        assert_eq!(app.input_field, InputField::LocalPort, "should skip Host");
+
+        app.open_new_machine_form();
+        app.prev_field();
+        assert_eq!(app.input_field, InputField::Name, "back from Host wraps to Name");
     }
 
     #[test]
