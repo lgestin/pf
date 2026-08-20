@@ -186,24 +186,47 @@ fn handle_normal_key(app: &mut AppState, key: KeyEvent) {
             }
         }
 
-        KeyCode::Char('o') => {
-            if let Some(Sel::Forward(host, name)) = app.selected_sel() {
-                if let Some(machine) = app.machines.iter().find(|m| m.host == host) {
-                    if let Some(f) = machine.forwards.iter().find(|f| f.name == name) {
-                        let url = format!("http://localhost:{}", f.local_port);
-                        let cmd = if cfg!(target_os = "macos") {
-                            "open"
-                        } else {
-                            "xdg-open"
-                        };
-                        let _ = std::process::Command::new(cmd).arg(&url).spawn();
-                        app.status_message = Some(format!("Opened {url}"));
-                    }
-                }
+        KeyCode::Char('o') => match selected_forward_url(app) {
+            Some(url) => {
+                let cmd = if cfg!(target_os = "macos") {
+                    "open"
+                } else {
+                    "xdg-open"
+                };
+                let _ = std::process::Command::new(cmd).arg(&url).spawn();
+                app.status_message = Some(format!("Opened {url}"));
             }
-        }
+            None => {
+                app.status_message = Some("Select a forward to open its URL".to_string());
+            }
+        },
+
+        // The URL as text, for the curl command or the terminal on the other
+        // monitor — the other half of `o`.
+        KeyCode::Char('y') => match selected_forward_url(app) {
+            Some(url) => {
+                app.status_message = Some(match (app.clipboard)(&url) {
+                    Ok(()) => format!("Copied {url}"),
+                    Err(e) => format!("Failed to copy: {e}"),
+                });
+            }
+            None => {
+                app.status_message = Some("Select a forward to copy its URL".to_string());
+            }
+        },
         _ => {}
     }
+}
+
+/// `http://localhost:<port>` for the forward under the cursor, if the cursor
+/// is on one.
+fn selected_forward_url(app: &AppState) -> Option<String> {
+    let Sel::Forward(host, name) = app.selected_sel()? else {
+        return None;
+    };
+    let machine = app.machines.iter().find(|m| m.host == host)?;
+    let f = machine.forwards.iter().find(|f| f.name == name)?;
+    Some(format!("http://localhost:{}", f.local_port))
 }
 
 fn handle_filter_key(app: &mut AppState, key: KeyCode) {
@@ -447,6 +470,83 @@ mod tests {
 
         handle_key(&mut app, ctrl('u'));
         assert_eq!(app.selected(), 0, "ctrl-u should move back up");
+    }
+
+    /// One live machine `gpu-01` with one forward `jupyter` on 8888, with the
+    /// forward row selected.
+    fn app_on_a_forward() -> AppState {
+        use crate::session::{AttachStatus, ForwardObs, SessionState, SessionStatus};
+        use crate::watcher::RetryPolicy;
+
+        let mut s = SessionState::new(
+            "gpu-01".to_string(),
+            std::process::id(),
+            true,
+            RetryPolicy::default(),
+        );
+        s.status = SessionStatus::Connected;
+        s.forwards = vec![ForwardObs {
+            name: "jupyter".to_string(),
+            local_port: 8888,
+            remote_host: "localhost".to_string(),
+            remote_port: 8888,
+            status: AttachStatus::Forwarded,
+            attached_at: None,
+            error: None,
+        }];
+
+        let mut app = app_with_hosts(&[]);
+        app.machines = tree::build_machines(
+            vec![s],
+            &BTreeSet::new(),
+            &[],
+            MachineListMode::AllHosts,
+            "",
+        );
+        app.expanded = tree::default_expanded(&app.machines);
+        app.rows = tree::flatten(&app.machines, &app.expanded);
+        app.select(1); // the forward row
+        app
+    }
+
+    #[test]
+    fn y_copies_the_forwards_local_url() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut app = app_on_a_forward();
+        let copied: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let sink = copied.clone();
+        app.clipboard = Box::new(move |text| {
+            *sink.borrow_mut() = Some(text.to_string());
+            Ok(())
+        });
+
+        handle_key(&mut app, key(KeyCode::Char('y')));
+
+        assert_eq!(
+            copied.borrow().as_deref(),
+            Some("http://localhost:8888"),
+            "y should put the local URL on the clipboard"
+        );
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Copied http://localhost:8888")
+        );
+    }
+
+    #[test]
+    fn y_on_a_machine_row_explains_itself() {
+        let mut app = app_on_a_forward();
+        app.clipboard = Box::new(|_| panic!("nothing should be copied"));
+        app.select(0); // the machine row
+
+        handle_key(&mut app, key(KeyCode::Char('y')));
+
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Select a forward to copy its URL")
+        );
     }
 
     fn numbered_lines(n: usize) -> Vec<String> {

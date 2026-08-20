@@ -1,6 +1,38 @@
 use super::tree::{self, MachineListMode, MachineRow, Row, Sel};
 use ratatui::widgets::{ListState, TableState};
 use std::collections::{BTreeSet, HashSet};
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+/// Write `text` to the system clipboard via the platform's own tool, so pf
+/// carries no clipboard dependency.
+fn system_clipboard(text: &str) -> Result<(), String> {
+    let candidates: &[&[&str]] = if cfg!(target_os = "macos") {
+        &[&["pbcopy"]]
+    } else {
+        // Wayland first; fall back to X11.
+        &[&["wl-copy"], &["xclip", "-selection", "clipboard"]]
+    };
+
+    for cmd in candidates {
+        let child = Command::new(cmd[0])
+            .args(&cmd[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let Ok(mut child) = child else { continue };
+        if let Some(stdin) = child.stdin.as_mut() {
+            if stdin.write_all(text.as_bytes()).is_err() {
+                continue;
+            }
+        }
+        if child.wait().is_ok_and(|s| s.success()) {
+            return Ok(());
+        }
+    }
+    Err("No clipboard tool found".to_string())
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
@@ -87,6 +119,9 @@ pub struct AppState {
 
     pub ssh_hosts: Vec<String>,
     pub status_message: Option<String>,
+
+    /// Seam for `y`: the system clipboard in production, a recorder in tests.
+    pub clipboard: Box<dyn Fn(&str) -> Result<(), String>>,
 }
 
 impl AppState {
@@ -123,6 +158,7 @@ impl AppState {
             input_name: String::new(),
             ssh_hosts,
             status_message: None,
+            clipboard: Box::new(system_clipboard),
         }
     }
 
