@@ -1,5 +1,5 @@
 use super::state::{AppState, ConfirmAction, InputField, Mode};
-use super::tree::{MachineRow, Row};
+use super::tree::{MachineRow, Row, Sel};
 use crate::process;
 use crate::session::{AttachStatus, SessionStatus};
 use chrono::{DateTime, Utc};
@@ -90,6 +90,7 @@ fn render_help_overlay(f: &mut Frame) {
         ("y", "copy URL"),
         ("/", "filter · ↑/↓ browse"),
         ("esc", "clear filter"),
+        ("q", "quit"),
     ];
 
     let key_style = Style::default().fg(ACCENT).add_modifier(Modifier::BOLD);
@@ -242,10 +243,12 @@ fn forward_row(machine: &MachineRow, fi: usize) -> TRow<'static> {
     // whitespace, which matters once several machines are expanded at once.
     let guide = if last { "  └─ " } else { "  ├─ " };
 
+    // The local port is the number you type into a browser — the one thing on
+    // the row worth finding without reading the row, so it takes the accent.
     let port_style = if f.status == AttachStatus::Failed {
         Style::default().fg(BAD)
     } else {
-        Style::default()
+        Style::default().fg(ACCENT)
     };
 
     // Only the guide and the arrow are structure; the ports themselves are the
@@ -653,17 +656,23 @@ fn keys(pairs: &[(&'static str, &'static str)]) -> Vec<Span<'static>> {
 
 fn render_status_bar(f: &mut Frame, app: &AppState, area: Rect) {
     let hint = match &app.mode {
-        // The essentials only; ? holds the rest.
-        Mode::Normal => keys(&[
-            ("j/k", "move"),
-            ("↵", "fold"),
-            ("a", "add"),
-            ("x", "stop"),
-            ("l", "logs"),
-            ("/", "filter"),
-            ("?", "help"),
-            ("q", "quit"),
-        ]),
+        // The essentials only; ? holds the rest. o and y need a URL to act
+        // on, so they appear only on a forward row — the bar stays a list of
+        // keys that do something right now.
+        Mode::Normal => {
+            let mut pairs: Vec<(&'static str, &'static str)> = vec![
+                ("j/k", "move"),
+                ("↵", "fold"),
+                ("a", "add"),
+                ("x", "stop"),
+                ("l", "logs"),
+            ];
+            if matches!(app.selected_sel(), Some(Sel::Forward(_, _))) {
+                pairs.extend([("o", "open"), ("y", "copy")]);
+            }
+            pairs.extend([("/", "filter"), ("?", "help"), ("q", "quit")]);
+            keys(&pairs)
+        }
         Mode::Logs => keys(&[
             ("j/k", "scroll"),
             ("g/G", "top/tail"),
@@ -884,6 +893,9 @@ mod tests {
         assert!(text.contains("open URL"), "o missing from help:\n{text}");
         assert!(text.contains("copy URL"), "y missing from help:\n{text}");
         assert!(text.contains("half page"), "ctrl-d/u missing from help:\n{text}");
+        // The bar clips its tail on a narrow terminal, so help has to be the
+        // complete list — quit included.
+        assert!(text.contains("quit"), "q missing from help:\n{text}");
     }
 
     #[test]
@@ -894,6 +906,51 @@ mod tests {
         assert!(text.contains("? help"), "no way to discover the help overlay:\n{text}");
         // The long tail lives in help now; the bar stays scannable.
         assert!(!text.contains("restart"), "menu still overflowing:\n{text}");
+    }
+
+    #[test]
+    fn the_menu_offers_o_and_y_only_while_a_forward_is_selected() {
+        let mut app = app_with(
+            vec![live("gpu-01", vec![obs("jupyter", 8888, AttachStatus::Forwarded)])],
+            &[],
+        );
+
+        // Row 0 is the machine: neither key does anything there.
+        app.select(0);
+        let text = draw(&mut app, 120, 12);
+        assert!(!text.contains("o open"), "o offered on a machine row:\n{text}");
+        assert!(!text.contains("y copy"), "y offered on a machine row:\n{text}");
+
+        // Row 1 is its forward, which has a URL to open and to copy.
+        app.select(1);
+        let text = draw(&mut app, 120, 12);
+        assert!(text.contains("o open"), "o missing on a forward row:\n{text}");
+        assert!(text.contains("y copy"), "y missing on a forward row:\n{text}");
+    }
+
+    #[test]
+    fn the_local_port_carries_the_accent() {
+        // It is the number you type into a browser — the one thing on a
+        // forward row worth finding without reading the row.
+        //
+        // Distinct ports, so "8888" can only be the local one.
+        let mut f = obs("jupyter", 8888, AttachStatus::Forwarded);
+        f.remote_port = 9999;
+        let mut app = app_with(vec![live("gpu-01", vec![f])], &[]);
+        let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+
+        assert_eq!(
+            fg_of_from(&terminal, "8888", 2),
+            Some(ACCENT),
+            "the local port should carry the accent"
+        );
+        // The remote side is context, not the payload — it stays plain.
+        assert_eq!(
+            fg_of_from(&terminal, "localhost:9999", 2),
+            Some(Color::Reset),
+            "the remote address should not compete with the local port"
+        );
     }
 
     #[test]
