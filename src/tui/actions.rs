@@ -72,6 +72,21 @@ pub fn restart_host(host: &str) -> Result<String, String> {
         Err(e) => return Err(format!("Failed to read {host}: {e}")),
     };
 
+    // A watcher that gave up leaves its `Failed` state behind on purpose, so
+    // the row you are pressing `r` on may have no process behind it. There is
+    // no master to kill in that case — the fix is a new watcher, which picks
+    // the desired set back up from disk.
+    match process::has_live_watcher(host) {
+        Ok(false) => {
+            return match crate::session::watcher::spawn(host) {
+                Ok(_) => Ok(format!("Restarting {host}")),
+                Err(e) => Err(format!("Failed to restart {host}: {e}")),
+            };
+        }
+        Err(e) => return Err(format!("Failed to read {host}: {e}")),
+        Ok(true) => {}
+    }
+
     let Some(master_pid) = state.master_pid else {
         return Err(format!("{host} has no live master"));
     };

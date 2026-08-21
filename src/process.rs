@@ -65,10 +65,28 @@ pub fn find_host_for_forward(name: &str) -> Result<Option<String>> {
     find_host_for_forward_in(&paths::run_dir()?, name)
 }
 
+/// Is a host's session actually being supervised right now?
+///
+/// A desired set that no live watcher owns is inert: it records intent that
+/// outlived its process — after a reboot, or after a watcher gave up — but
+/// nothing is acting on it.
+pub fn has_live_watcher_in(run: &Path, host: &str) -> bool {
+    matches!(store::load_state_in(run, host), Ok(Some(s)) if is_alive(s.watcher_pid))
+}
+
+pub fn has_live_watcher(host: &str) -> Result<bool> {
+    Ok(has_live_watcher_in(&paths::run_dir()?, host))
+}
+
 pub fn check_name_available_in(run: &Path, name: &str) -> Result<()> {
     match find_host_for_forward_in(run, name)? {
-        Some(_) => Err(PfError::AlreadyRunning(name.to_string())),
-        None => Ok(()),
+        // "Taken" has to mean taken by something running. Intent now survives a
+        // reboot, so after one every host has an orphaned desired set — and
+        // refusing those names would make yesterday's forwards unstartable.
+        Some(host) if has_live_watcher_in(run, &host) => {
+            Err(PfError::AlreadyRunning(name.to_string()))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -105,11 +123,13 @@ pub fn start_forward(
         return Err(PfError::PortInUse(local_port));
     }
 
-    let had_session = store::load_state(host)?
-        .map(|s| is_alive(s.watcher_pid))
-        .unwrap_or(false);
+    let run = paths::run_dir()?;
+    // A host whose watcher is gone still has its desired set on disk. Spawning
+    // a watcher hands it back that whole set, so this brings up the forwards
+    // that were interrupted alongside the one being asked for.
+    let had_session = has_live_watcher_in(&run, host);
 
-    store::update_desired_in(&paths::run_dir()?, host, |s| {
+    store::update_desired_in(&run, host, |s| {
         s.host = host.to_string();
         s.auto_reconnect = reconnect;
         s.retry = policy;
@@ -223,16 +243,81 @@ mod tests {
         drop(v6);
     }
 
+    /// Claim a host's session for a watcher with the given pid. Using our own
+    /// pid is the only way to name a process that is reliably alive.
+    fn seed_watcher(run: &std::path::Path, host: &str, pid: u32) {
+        let state = crate::session::SessionState::new(
+            host.to_string(),
+            pid,
+            true,
+            crate::watcher::RetryPolicy::default(),
+        );
+        store::save_state_in(run, &state).unwrap();
+    }
+
     #[test]
     fn a_name_already_used_on_another_host_is_rejected() {
         // Names stay globally unique — `pf stop <name>` has to be unambiguous.
         let d = tempfile::tempdir().unwrap();
         seed(d.path(), "gpu-01", &[("jupyter", 8888)]);
+        seed_watcher(d.path(), "gpu-01", std::process::id());
 
         let err = check_name_available_in(d.path(), "jupyter").unwrap_err();
         assert!(
             matches!(err, crate::error::PfError::AlreadyRunning(ref n) if n == "jupyter"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_name_held_only_by_a_dead_session_is_free_again() {
+        // After a reboot every desired file is an orphan. If those names stayed
+        // claimed, the forwards you had yesterday would be unstartable today.
+        let d = tempfile::tempdir().unwrap();
+        seed(d.path(), "gpu-01", &[("jupyter", 8888)]);
+
+        // No state file at all: intent that outlived its watcher.
+        assert!(check_name_available_in(d.path(), "jupyter").is_ok());
+
+        // A state file naming a pid that is gone is equally not a conflict.
+        seed_watcher(d.path(), "gpu-01", dead_pid());
+        assert!(check_name_available_in(d.path(), "jupyter").is_ok());
+    }
+
+    #[test]
+    fn a_session_counts_as_live_only_while_its_watcher_is() {
+        let d = tempfile::tempdir().unwrap();
+        seed(d.path(), "gpu-01", &[("jupyter", 8888)]);
+
+        assert!(!has_live_watcher_in(d.path(), "gpu-01"), "no state file");
+
+        seed_watcher(d.path(), "gpu-01", dead_pid());
+        assert!(!has_live_watcher_in(d.path(), "gpu-01"), "dead pid");
+
+        seed_watcher(d.path(), "gpu-01", std::process::id());
+        assert!(has_live_watcher_in(d.path(), "gpu-01"));
+    }
+
+    /// A pid that has certainly exited: spawn something trivial and reap it.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[test]
+    fn a_forward_name_still_resolves_to_a_host_whose_watcher_died() {
+        // `stop` and `logs` have to reach orphaned sessions — that is the only
+        // way to clear one by hand.
+        let d = tempfile::tempdir().unwrap();
+        seed(d.path(), "gpu-01", &[("jupyter", 8888)]);
+
+        assert_eq!(
+            find_host_for_forward_in(d.path(), "jupyter")
+                .unwrap()
+                .as_deref(),
+            Some("gpu-01")
         );
     }
 }

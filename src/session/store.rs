@@ -3,6 +3,7 @@ use crate::paths;
 use crate::session::{DesiredSession, SessionState};
 use crate::watcher::RetryPolicy;
 use nix::fcntl::{Flock, FlockArg};
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
@@ -109,19 +110,71 @@ pub fn list_states_in(run: &Path) -> Result<Vec<SessionState>> {
     Ok(out)
 }
 
-pub fn remove_session_in(run: &Path, host: &str) -> Result<()> {
-    let key = paths::sanitize_host(host);
-    for path in [
-        paths::desired_file_in(run, &key),
-        paths::state_file_in(run, &key),
-        paths::socket_file_in(run, &key),
-        paths::lock_file_in(run, &key),
-    ] {
+/// Every host the run directory knows about, whether or not a watcher owns it.
+///
+/// The host is read back out of the file rather than off the filename, because
+/// the filename is a sanitized key that is deliberately lossy — feeding it back
+/// to a command as a host name would not always work.
+pub fn list_hosts_in(run: &Path) -> Result<Vec<String>> {
+    if !run.exists() {
+        return Ok(vec![]);
+    }
+    let mut hosts = BTreeSet::new();
+    for entry in std::fs::read_dir(run)? {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if name.ends_with(".desired.json") {
+            if let Ok(d) = serde_json::from_str::<DesiredSession>(&raw) {
+                hosts.insert(d.host);
+            }
+        } else if name.ends_with(".state.json") {
+            if let Ok(s) = serde_json::from_str::<SessionState>(&raw) {
+                hosts.insert(s.host);
+            }
+        }
+    }
+    Ok(hosts.into_iter().collect())
+}
+
+fn remove_files(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
         if path.exists() {
             std::fs::remove_file(path)?;
         }
     }
     Ok(())
+}
+
+/// Remove everything a session owns, its desired forward set included.
+pub fn remove_session_in(run: &Path, host: &str) -> Result<()> {
+    let key = paths::sanitize_host(host);
+    remove_files(&[
+        paths::desired_file_in(run, &key),
+        paths::state_file_in(run, &key),
+        paths::socket_file_in(run, &key),
+        paths::lock_file_in(run, &key),
+    ])
+}
+
+/// Remove only the files that mean something while a watcher is alive: the
+/// control socket and the lock. Both are recreated on demand, so leaving them
+/// behind is just litter that a later `ssh -O check` could misread.
+pub fn clear_transient_in(run: &Path, host: &str) -> Result<()> {
+    let key = paths::sanitize_host(host);
+    remove_files(&[
+        paths::socket_file_in(run, &key),
+        paths::lock_file_in(run, &key),
+    ])
+}
+
+/// Remove a host's observed state, leaving its desired forward set intact.
+pub fn remove_state_in(run: &Path, host: &str) -> Result<()> {
+    remove_files(&[paths::state_file_in(run, &paths::sanitize_host(host))])
 }
 
 // Wrappers that resolve the real run directory. Only these three: every other
@@ -254,6 +307,78 @@ mod tests {
     fn removing_a_session_that_never_existed_is_not_an_error() {
         let d = tmp();
         remove_session_in(d.path(), "never-was").unwrap();
+    }
+
+    #[test]
+    fn clearing_transients_keeps_intent_and_observed_state() {
+        let d = tmp();
+        update_desired_in(d.path(), "gpu-01", |_| {}).unwrap();
+        save_state_in(
+            d.path(),
+            &SessionState::new("gpu-01".to_string(), 1, true, RetryPolicy::default()),
+        )
+        .unwrap();
+        std::fs::write(d.path().join("gpu-01.sock"), "").unwrap();
+
+        clear_transient_in(d.path(), "gpu-01").unwrap();
+
+        assert!(!d.path().join("gpu-01.sock").exists());
+        assert!(!d.path().join("gpu-01.lock").exists());
+        assert!(load_desired_in(d.path(), "gpu-01").unwrap().is_some());
+        assert!(load_state_in(d.path(), "gpu-01").unwrap().is_some());
+    }
+
+    #[test]
+    fn removing_state_leaves_the_desired_set_alone() {
+        let d = tmp();
+        update_desired_in(d.path(), "gpu-01", |_| {}).unwrap();
+        save_state_in(
+            d.path(),
+            &SessionState::new("gpu-01".to_string(), 1, true, RetryPolicy::default()),
+        )
+        .unwrap();
+
+        remove_state_in(d.path(), "gpu-01").unwrap();
+
+        assert!(load_state_in(d.path(), "gpu-01").unwrap().is_none());
+        assert!(load_desired_in(d.path(), "gpu-01").unwrap().is_some());
+    }
+
+    #[test]
+    fn listing_hosts_covers_desired_only_and_state_only_sessions() {
+        let d = tmp();
+        // Intent that outlived its watcher — no state file at all.
+        update_desired_in(d.path(), "orphan", |_| {}).unwrap();
+        // A live session, both files.
+        update_desired_in(d.path(), "gpu-01", |_| {}).unwrap();
+        save_state_in(
+            d.path(),
+            &SessionState::new("gpu-01".to_string(), 1, true, RetryPolicy::default()),
+        )
+        .unwrap();
+        // State with no intent, which is what a half-cleaned host looks like.
+        save_state_in(
+            d.path(),
+            &SessionState::new("stateonly".to_string(), 1, true, RetryPolicy::default()),
+        )
+        .unwrap();
+        std::fs::write(d.path().join("noise.txt"), "ignore me").unwrap();
+
+        assert_eq!(
+            list_hosts_in(d.path()).unwrap(),
+            vec!["gpu-01", "orphan", "stateonly"],
+            "clean has to see hosts that only have one of the two files"
+        );
+    }
+
+    #[test]
+    fn listing_hosts_reports_the_raw_host_not_the_filename_key() {
+        // The filename is a sanitized key that does not round-trip, so reading
+        // the host off the filename would hand `clean` a name it cannot use.
+        let d = tmp();
+        update_desired_in(d.path(), "weird host/name", |_| {}).unwrap();
+
+        assert_eq!(list_hosts_in(d.path()).unwrap(), vec!["weird host/name"]);
     }
 
     #[test]

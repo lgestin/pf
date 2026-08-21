@@ -311,12 +311,16 @@ fn cmd_config_list() -> Result<()> {
 }
 
 fn cmd_clean() -> Result<()> {
+    let run = paths::run_dir()?;
     let mut cleaned = 0;
 
-    for state in session::store::list_states()? {
-        if !process::is_alive(state.watcher_pid) {
-            session::store::remove_session(&state.host)?;
-            println!("Cleaned stale session for '{}'", state.host);
+    // Walk hosts rather than state files: a session interrupted by a reboot
+    // keeps its desired set and nothing else, so a state-file sweep would never
+    // see it. This is the way to discard intent that outlived its watcher.
+    for host in session::store::list_hosts_in(&run)? {
+        if !process::has_live_watcher_in(&run, &host) {
+            session::store::remove_session_in(&run, &host)?;
+            println!("Cleaned stale session for '{host}'");
             cleaned += 1;
         }
     }

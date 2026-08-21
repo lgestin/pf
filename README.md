@@ -64,7 +64,7 @@ pf config remove <NAME>
 pf config list
 
 pf hosts                    List SSH hosts from ~/.ssh/config
-pf clean                    Remove stale state files
+pf clean                    Forget sessions no live watcher owns
 pf completions <SHELL>      Generate shell completions (bash/zsh/fish)
 pf tui                      Launch interactive dashboard
 ```
@@ -168,6 +168,20 @@ Retry settings are per **machine**, since the connection is shared: `--max-retri
 
 Because the master carries no forwards of its own, one forward failing to bind does not affect the others on that machine — it goes `failed` with ssh's reason while its neighbours keep running.
 
+When a watcher does stop trying — `--no-reconnect`, or `--max-retries` running out — it leaves its last state on disk, so the machine shows as `failed` with the reason rather than disappearing. `r` on it, or `pf restart <name>`, starts a fresh watcher.
+
+### Shutting down
+
+A reboot SIGTERMs every watcher. That ends the sessions, but it is not a decision to stop forwarding, so a departing watcher keeps its desired forward set: what you had running is still recorded after you boot back up.
+
+There is no auto-start, so nothing comes back on its own. Starting any forward on a machine hands its watcher the whole desired set, which brings back the rest along with it:
+
+```bash
+pf start lovelace 8080:80    # also restores whatever else that machine had
+```
+
+`pf clean` is the other direction — it discards every session no live watcher owns, forgetting what was interrupted.
+
 ## Shell Completions
 
 ```bash
@@ -195,7 +209,7 @@ Completions include dynamic SSH host and profile name suggestions for `pf start`
   logs/<host>.log            Master output + attach/detach events
 ```
 
-Every file has exactly one writer, which is why intent and observed state are split rather than sharing a file.
+Every file has exactly one writer, which is why intent and observed state are split rather than sharing a file. They also have different lifetimes: observed state describes a process, so it goes when that process does, while intent is the one thing here you typed and outlives the watcher that was serving it.
 
 ## Architecture
 
