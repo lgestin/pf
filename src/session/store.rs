@@ -172,6 +172,13 @@ pub fn clear_transient_in(run: &Path, host: &str) -> Result<()> {
     ])
 }
 
+/// Remove just the control socket. ssh refuses to replace an existing one
+/// ("already exists, disabling multiplexing"), so a socket left by a watcher
+/// that died uncleanly would leave every later master unreachable.
+pub fn remove_socket_in(run: &Path, host: &str) -> Result<()> {
+    remove_files(&[paths::socket_file_in(run, &paths::sanitize_host(host))])
+}
+
 /// Remove a host's observed state, leaving its desired forward set intact.
 pub fn remove_state_in(run: &Path, host: &str) -> Result<()> {
     remove_files(&[paths::state_file_in(run, &paths::sanitize_host(host))])
@@ -307,6 +314,20 @@ mod tests {
     fn removing_a_session_that_never_existed_is_not_an_error() {
         let d = tmp();
         remove_session_in(d.path(), "never-was").unwrap();
+    }
+
+    #[test]
+    fn removing_a_stale_socket_leaves_the_lock_alone() {
+        let d = tmp();
+        std::fs::write(d.path().join("gpu-01.sock"), "").unwrap();
+        std::fs::write(d.path().join("gpu-01.lock"), "").unwrap();
+
+        remove_socket_in(d.path(), "gpu-01").unwrap();
+
+        assert!(!d.path().join("gpu-01.sock").exists());
+        assert!(d.path().join("gpu-01.lock").exists());
+        // Nothing to remove is fine too.
+        remove_socket_in(d.path(), "gpu-01").unwrap();
     }
 
     #[test]

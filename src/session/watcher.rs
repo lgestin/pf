@@ -341,6 +341,11 @@ pub fn run(host: String) {
                 }
             };
 
+            // `check` just failed, so any socket file here is dead.
+            if let Err(e) = store::remove_socket_in(&run_dir, &host) {
+                slog!(host, "Cannot remove stale control socket: {e}");
+            }
+
             match ssh
                 .master_command(&host)
                 .stdin(std::process::Stdio::null())
@@ -374,7 +379,15 @@ pub fn run(host: String) {
                 std::thread::sleep(Duration::from_millis(100));
             }
             if !ssh.check(&host) {
-                slog!(host, "Master did not become ready");
+                // A master that is up but unreachable (multiplexing disabled,
+                // stuck handshake) would otherwise hold the slot until the
+                // remote drops it. Kill it; the reap above then retries with
+                // backoff.
+                slog!(host, "Master did not become ready; killing it");
+                if let Some(child) = master.as_mut() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
                 continue;
             }
 
